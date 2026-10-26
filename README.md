@@ -1,4 +1,4 @@
-# CosmOS Beta v0.1 — Construção 0.3.2026
+# CosmOS Beta v0.1 — Construção 0.4.2026
 
 Sistema operacional construído do zero, começando pelo zero absoluto: o **primeiro
 estágio de boot** (Assembly/NASM), o **segundo estágio** (C freestanding) e o
@@ -21,7 +21,13 @@ Desenvolvimento/
 │   ├── inimin.asm      # Primeiro estágio de boot (2 setores) — FONTE
 │   └── inicio.c        # Segundo estágio de boot (C) — FONTE
 ├── nucleo/
-│   ├── nucleo.rs       # Núcleo do CosmOS (Rust no_std) — FONTE
+│   ├── nucleo.rs       # Núcleo/maestro — coordena os módulos — FONTE
+│   ├── texto.rs        # Driver de texto (fonte 8x8) — FONTE
+│   ├── memoria/
+│   │   └── memoria.rs  # Gerenciador de memória RAM (heap) — FONTE
+│   ├── drivers/
+│   │   └── video/
+│   │       └── video.rs # Driver de vídeo (modo 13h) — FONTE
 │   └── nucleo.ld       # Linker script: _start é o primeiro byte em 0x20000
 ├── copilar.sh          # Compila os três estágios e gera a CosmOS.img
 └── README.md           # Este arquivo
@@ -33,7 +39,7 @@ Gerados pelo `copilar.sh` (não versionados à mão):
 ├── ini/inimin          # Binário do inimin.asm (1024 bytes = 2 setores)
 ├── ini/inicio.o        # Objeto ELF gerado a partir de inicio.c
 ├── ini/inicio          # Binário plano do inicio.c (carregado em 0x10000)
-├── nucleo/nucos        # Binário plano do nucleo.rs (carregado em 0x20000)
+├── nucleo/nucos        # Binário plano do nucleo.rs + drivers (0x20000)
 └── CosmOS.img          # Imagem de 20 MB, ext4, pronta para bootar no QEMU
 ```
 
@@ -57,7 +63,7 @@ rustup target add i686-unknown-linux-gnu
 | `nasm` | `nasm` | Montar o `ini/inimin.asm` |
 | `gcc` | `gcc` | Compilar o `ini/inicio.c` em modo freestanding (`-m32`) |
 | `ld`, `objcopy`, `nm` | `binutils` | Linkar os binários planos e conferir os endereços |
-| `rustc`, `rustup` | [rustup.rs](https://rustup.rs) | Compilar o `nucleo/nucleo.rs` (`#![no_std]`) |
+| `rustc`, `rustup` | [rustup.rs](https://rustup.rs) | Compilar `nucleo/nucleo.rs` e os drivers (`#![no_std]`) |
 | `qemu-system-x86_64` | `qemu-system-x86` | Executar a `CosmOS.img` |
 | `mkfs.ext4` / `debugfs` / `e2fsck` | `e2fsprogs` | Criar, popular e verificar a imagem ext4 (sem root) |
 
@@ -98,7 +104,7 @@ qemu-system-x86_64 -drive format=raw,file=CosmOS.img,if=ide -boot order=c -m 128
 **totalmente preto** e, na **primeira linha, centralizada**, a mensagem:
 
 ```
-CosmOS Beta v0.1 Construção 0.3.2026
+CosmOS Beta v0.1 Construção 0.4.2026
 ```
 
 **2 segundos depois**, o segundo estágio passa o controle para o núcleo, que
@@ -122,8 +128,10 @@ BIOS
                           └─> ATA PIO: acha /nucleo/nucos no ext4
                                └─> espera 2 s (PIT por polling)
                                     └─> 0x20000   núcleo (nucos)
-                                         └─> nucleo.rs limpa a tela e
-                                              escreve "Entrou no Nucos"
+                                         └─> nucleo.rs limpa a tela (preto)
+                                              e pede ao texto.rs para
+                                              escrever "Entrou no Nucos"
+                                              (que desenha via video.rs)
 ```
 
 ### Mapa de memória (modo protegido)
@@ -135,6 +143,7 @@ BIOS
 | `0x20000` | `nucleo/nucos` (núcleo, até 256 KiB) |
 | `0x90000` | Topo da pilha (definida pelo `inimin`; o `inicio` a zera antes do salto) |
 | `0xA0000` | Memória de vídeo do modo 13h (320×200×8) |
+| `0x100000` | Início do heap gerenciado pelo `memoria.rs` (1 MiB) |
 
 ### Fase 1 — `ini/inimin.asm` (primeiro estágio)
 
@@ -194,25 +203,55 @@ A mensagem é tratada como UTF-8 para desenhar corretamente **`ç`** e **`ã`**.
 O build usa `-fno-toplevel-reorder` para que `_start` seja o primeiro código do
 binário; o `copilar.sh` confere com `nm` que ele está em `0x00010000`.
 
-### Fase 3 — `nucleo/nucleo.rs` (núcleo)
+### Fase 3 — `nucleo/nucleo.rs` (maestro) + módulos
 
 | Item | Valor |
 |---|---|
-| Arquivo | `nucleo/nucleo.rs` |
+| Arquivos | `nucleo/nucleo.rs` (maestro), `nucleo/drivers/video/video.rs` (vídeo), `nucleo/texto.rs` (texto) e `nucleo/memoria/memoria.rs` (RAM) |
 | Binário | `nucleo/nucos` (binário plano, sem ELF) |
 | Endereço de carga | **0x20000** (o `_start` fica exatamente no primeiro byte) |
 | Arquitetura | **x86 32 bits, modo protegido** |
 | Biblioteca | nenhuma — `#![no_std]`, sem libc |
-| Compilação | `rustc --target i686-unknown-linux-gnu -C panic=abort --emit=obj` |
-| Linkagem | `ld -m elf_i386 -T nucleo/nucleo.ld --nmagic` + `objcopy -O binary` |
+| Compilação | `rustc --target i686-unknown-linux-gnu -C panic=abort -C target-feature=-sse,-sse2 --emit=obj` para cada `.rs` |
+| Linkagem | `ld -m elf_i386 -T nucleo/nucleo.ld --nmagic` (nucleo.o + video.o + texto.o + memoria.o) + `objcopy -O binary` |
 | Vídeo | **Modo 13h: 320×200, 256 cores** |
 
-O que ele faz:
+O `nucleo.rs` é só o **maestro**: não desenha nem administra memória, apenas
+chama os módulos na ordem certa.
 
-1. **limpa a tela** inteira (64000 bytes de `0xA0000`);
-2. desenha **"Entrou no Nucos"** na **primeira linha, à esquerda** (`x = 0`, `y = 2`),
-   com a mesma fonte 8×8 do `inicio` (glifos `E`, `N` e `c` desenhados à mão);
-3. entra em espera infinita (`hlt`).
+- `video.rs` exporta `video_limpar(cor)` e `video_pixel(x, y, cor)`;
+- `texto.rs` exporta `texto_escrever(texto, tamanho, x, y)` e
+  `texto_escrever_numero(valor, x, y)`, guarda a fonte 8×8 (dígitos, letras e
+  minúsculas do alfabeto usado) e desenha cada caractere chamando `video_pixel`;
+- `memoria.rs` exporta `memoria_iniciar()`, `memoria_alocar(tamanho, alinhamento)`,
+  `memoria_resetar()`, `memoria_total()`, `memoria_usada()` e `memoria_livre()`.
+
+O que o maestro faz:
+
+1. **inicia o vídeo**: limpa a tela inteira em preto (`video_limpar(0)`);
+2. **inicia a memória**: chama `memoria_iniciar()`, que lê o mapa **E820**
+   deixado pelo primeiro estágio e monta um heap linear a partir de **1 MiB**;
+3. manda escrever **"Entrou no Nucos"** (`x = 0`, `y = 2`) e, na segunda linha
+   (`y = 14`), **`RAM DE <bytes> BYTES`** com o tamanho real da RAM instalada,
+   usando `texto_escrever_numero()`;
+4. entra em espera infinita (`hlt`).
+
+#### Como o `memoria.rs` gerencia a RAM
+
+- O primeiro estágio (`ini/inimin.asm`) chama a BIOS (`int 0x15`, `E820`) antes
+  de carregar o setor 1 e grava o mapa em `0x5000` (24 bytes por entrada), com a
+  contagem em `0x4FF0` e a assinatura `0xE820` em `0x4FF2`.
+- O módulo percorre as entradas de **tipo 1** (memória utilizável), pega o maior
+  fim e arredonda para o próximo MiB — é assim que a tela mostra o tamanho real
+  (ex.: `-m 128M` → `RAM DE 134217728 BYTES`). Se o mapa não existir, cai para a
+  CMOS (`0x30`/`0x31`).
+- O heap começa em `0x100000` (1 MiB) e termina no fim da região utilizável que
+  contém o heap, menos uma reserva de 2 MiB para tabelas do firmware.
+- O alocador é do tipo **bump**: `memoria_alocar()` avança um ponteiro,
+  respeita o alinhamento pedido e devolve memória zerada. Ainda não há
+  liberação individual; `memoria_resetar()` devolve o heap inteiro.
+- `memoria_total()`, `memoria_usada()` e `memoria_livre()` expõem as contas
+  para os próximos módulos.
 
 Detalhe importante do `nucleo/nucleo.ld`: o rustc marca o código de pânico como
 frio (`.text.unlikely`) e o script padrão do ld colocaria **essa seção primeiro**,
@@ -221,8 +260,8 @@ fazendo o salto para `0x20000` cair no pânico. Por isso o `_start` usa
 de `.text.unlikely` — o primeiro byte do arquivo é sempre o `_start`
 (o `copilar.sh` confere com `nm` que ele está em `0x00020000`).
 
-Hoje o núcleo é um arquivo só; no futuro outros `.rs` entram junto, com o
-`nucleo.ld` como base para a linkagem.
+Cada módulo novo entra como um `.rs` separado (compilado em seu próprio `.o`) e é
+somado na linha do `ld`; o `nucleo.ld` continua sendo a base da linkagem.
 
 ---
 
@@ -233,9 +272,11 @@ Hoje o núcleo é um arquivo só; no futuro outros `.rs` entram junto, com o
 2. **Compila** `ini/inicio.c` com `gcc -m32` freestanding em `ini/inicio.o`,
    linka em `0x10000` (`ld -e _start`), converte para binário plano com
    `objcopy` e confere a entrada `_start` com `nm`;
-3. **Compila** `nucleo/nucleo.rs` com `rustc` (`#![no_std]`, `panic=abort`,
-   `relocation-model=static`) em um objeto, linka com o `nucleo.ld` em
-   `0x20000`, converte para binário plano e confere o `_start` com `nm`;
+3. **Compila** `nucleo/nucleo.rs` e os módulos `nucleo/drivers/video/video.rs`,
+   `nucleo/texto.rs` e `nucleo/memoria/memoria.rs` com `rustc` (`#![no_std]`,
+   `panic=abort`, `relocation-model=static`) em objetos separados, linka os
+   quatro com o `nucleo.ld` em `0x20000`, converte para binário plano e confere
+   o `_start` com `nm`;
 4. **Cria** a `CosmOS.img` vazia com exatamente **20 MB** (`dd`);
 5. **Formata** em **ext4** com rótulo `CosmOS`, blocos de **1 KiB** e inodes de
    **256 bytes** (`mkfs.ext4 -b 1024 -I 256`);
@@ -274,15 +315,26 @@ pixels das capturas):
 - raiz da imagem contendo **apenas** `/inicio` e `/nucleo`, com `inimin`,
   `inicio` e `nucos` como arquivos separados;
 - boot real no QEMU: CPU em **modo protegido** (`CPL=0`), sem nenhuma
-  instrução SSE/AVX no núcleo (não precisa mexer no CR4);
-- **t ≈ 1 s:** mensagem **"CosmOS Beta v0.1 Construção 0.3.2026"** centralizada,
+  instrução SSE/AVX no núcleo. O `copilar.sh` compila os módulos com
+  `-C target-feature=-sse,-sse2` justamente para garantir isso (um `xorps`/
+  `movaps` gerado pelo `rustc` derrubava a CPU em *triple fault*);
+- **t ≈ 1 s:** mensagem **"CosmOS Beta v0.1 Construção 0.4.2026"** centralizada,
   ocupando `x = 16..300` e `y = 2..9` (primeira linha);
 - **t ≈ 4 s:** tela **limpa**, mensagem **"Entrou no Nucos"** na primeira linha
-  à esquerda, ocupando `x = 0..116` e `y = 2..8` — o controle chegou ao núcleo.
+  à esquerda, ocupando `x = 0..116` e `y = 2..8` — o controle chegou ao núcleo;
+- **memória:** a segunda linha (`y = 14`) mostra o tamanho **real** da RAM em
+  bytes, lido do mapa E820: com `-m 64M` → **`RAM DE 67108864 BYTES`**,
+  com `-m 128M` → **`RAM DE 134217728 BYTES`** e com `-m 256M` →
+  **`RAM DE 268435456 BYTES`**.
 
-Bugs encontrados e corrigidos durante a Construção 0.3.2026:
+Bugs encontrados e corrigidos durante a Construção 0.4.2026:
 
 1. `u8 i; ... i < 256` em `carrega_inode` virava **loop infinito** (o `u8` dá a
    volta antes de chegar a 256) — corrigido para `u16`;
 2. o `_start` do núcleo saía em `0x20062` porque `.text.unlikely` (pânico)
-   vinha antes — corrigido com `nucleo.ld` + `#[link_section]`.
+   vinha antes — corrigido com `nucleo.ld` + `#[link_section]`;
+3. o `rustc` gerava `xorps`/`movaps` ao zerar o buffer de dígitos de
+   `texto_escrever_numero`. Com `CR4.OSFXSR` desligado, a instrução SSE gera
+   `#UD` e a CPU entrava em *triple fault* (a tela ficava no "Entrou no Nucos"
+   e o QEMU reiniciava) — corrigido compilando o núcleo com
+   `-C target-feature=-sse,-sse2`.

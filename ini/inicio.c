@@ -1,12 +1,12 @@
 /* ==========================================================================
- *   CosmOS Beta v0.1 — Construção 0.3.2026
+ *   CosmOS Beta v0.1 — Construção 0.4.2026
  *   ini/inicio.c — Segundo estágio de boot do CosmOS
  * --------------------------------------------------------------------------
  *   Alvo   : x86 32 bits, modo protegido (o inimin entra em modo protegido
  *            e salta para 0x10000, onde este binário foi carregado)
  *   Vídeo  : modo 13h — 320x200, 256 cores (8 bits por pixel)
  *   Estado : fundo totalmente preto; na primeira linha, centralizada,
- *            a mensagem "CosmOS Beta v0.1 Construção 0.3.2026"
+ *            a mensagem "CosmOS Beta v0.1 Construção 0.4.2026"
  *   Depois : lê o ext4 da imagem (ATA PIO — a BIOS não existe em modo
  *            protegido), procura /nucleo/nucos, carrega em 0x20000,
  *            espera 2 segundos (PIT por polling, sem interrupções) e
@@ -412,7 +412,7 @@ static u16 comprimento(const u8 *texto)
 static void desenhar_texto(void)
 {
     static const u8 mensagem[] =
-        "CosmOS Beta v0.1 Construção 0.3.2026";
+        "CosmOS Beta v0.1 Construção 0.4.2026";
 
     u16 total = comprimento(mensagem);
     u16 i = 0;

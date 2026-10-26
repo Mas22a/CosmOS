@@ -1,5 +1,5 @@
 ; ==========================================================================
-;   CosmOS Beta v0.1 — Construção 0.3.2026
+;   CosmOS Beta v0.1 — Construção 0.4.2026
 ;   ini/inimin.asm — Primeiro estágio de boot do CosmOS
 ; --------------------------------------------------------------------------
 ;   Alvo   : x86-64 (o BIOS entrega a CPU em modo real de 16 bits)
@@ -25,6 +25,9 @@
 %define BUF        0x6000       ; bloco ext4 de 1 KiB lido pelo BIOS
 %define CARREGADOR 0x7E00       ; onde o setor 1 é carregado
 %define DEST_SEG   0x1000       ; 0x1000:0x0000 = 0x10000 (2º estágio)
+%define MAPA_E820  0x5000       ; mapa de memória do BIOS (24 bytes/entrada)
+%define CONT_E820  0x4FF0       ; contagem de entradas do mapa
+%define MAGIA_E820 0x4FF2       ; assinatura "mapa válido"
 
 ; ==========================================================================
 ; SETOR 0 — carrega o setor 1 para 0x7E00 e salta para ele
@@ -38,6 +41,11 @@ setor0:
     mov sp, 0x7C00
     cld
     sti
+
+    ; --- mapa de RAM do BIOS (E820) ------------------------------------
+    mov [drive_boot], dl
+    call detectar_ram
+    mov dl, [drive_boot]
 
     mov si, dap_boot
     mov ah, 0x42
@@ -58,6 +66,38 @@ dap_boot:
     dw CARREGADOR
     dw 0
     dq 1                        ; LBA 1
+
+; --------------------------------------------------------------------------
+; detectar_ram — int 0x15/E820 -> mapa em 0x5000 e contagem em 0x4FF0
+; --------------------------------------------------------------------------
+detectar_ram:
+    xor ebx, ebx
+    xor bp, bp
+    mov di, MAPA_E820
+.loop:
+    mov eax, 0xE820
+    mov edx, 0x534D4150         ; "SMAP"
+    mov ecx, 24
+    mov dword [di + 20], 1
+    int 0x15
+    jc .fim
+    cmp eax, 0x534D4150
+    jne .fim
+    add di, 24
+    inc bp
+    cmp bp, 128                 ; não passa de 0x5C00 (BUF fica em 0x6000)
+    jae .fim
+    test ebx, ebx
+    jnz .loop
+.fim:
+    mov [CONT_E820], bp
+    test bp, bp
+    jz .saida
+    mov word [MAGIA_E820], 0xE820
+.saida:
+    ret
+
+drive_boot: db 0
 
     times 510 - ($ - $$) db 0
     dw 0xAA55

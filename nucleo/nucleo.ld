@@ -1,5 +1,5 @@
 /* ==========================================================================
- *   CosmOS Beta v0.1 — Construção 0.3.2026
+ *   CosmOS Beta v0.1 — Construção 0.4.2026
  *   nucleo/nucleo.ld — Linker script do núcleo (Nucos)
  * --------------------------------------------------------------------------
  *   O ini/inicio carrega /nucleo/nucos em 0x20000 como binário plano e salta

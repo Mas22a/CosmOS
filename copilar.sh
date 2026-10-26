@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
 # ==========================================================================
-#   CosmOS Beta v0.1 — Construção 0.3.2026
+#   CosmOS Beta v0.1 — Construção 0.4.2026
 #   copilar.sh — compila os estágios de boot e gera a imagem CosmOS.img
 # --------------------------------------------------------------------------
 #   O que este script faz:
 #     1) Monta ini/inimin.asm  →  ini/inimin (1024 bytes = 2 setores)
 #     2) Compila ini/inicio.c  →  ini/inicio.o (objeto ELF)
 #                                →  ini/inicio   (binário plano em 0x10000)
-#     3) Compila nucleo/nucleo.rs → nucleo/nucos (binário plano em 0x20000)
+#     3) Compila nucleo/drivers/video/video.rs (driver de vídeo),
+#        nucleo/texto.rs (driver de texto), nucleo/memoria/memoria.rs
+#        (gerenciador de RAM) e nucleo/nucleo.rs, linka os quatro →
+#        nucleo/nucos (binário plano em 0x20000)
 #     4) Cria a imagem vazia CosmOS.img com 20 MB
 #     5) Formata a imagem em ext4 (blocos de 1 KiB, inodes de 256 bytes)
 #     6) Cria somente as pastas inicio/ e nucleo/ dentro da imagem e coloca
@@ -33,6 +36,9 @@ FONTE_C="$RAIZ/ini/inicio.c"
 OBJ_C="$RAIZ/ini/inicio.o"
 BIN_C="$RAIZ/ini/inicio"
 FONTE_RS="$RAIZ/nucleo/nucleo.rs"
+FONTE_VIDEO="$RAIZ/nucleo/drivers/video/video.rs"
+FONTE_TEXTO="$RAIZ/nucleo/texto.rs"
+FONTE_MEMORIA="$RAIZ/nucleo/memoria/memoria.rs"
 NUCOS="$RAIZ/nucleo/nucos"
 IMG="$RAIZ/CosmOS.img"
 TAMANHO_MB=20
@@ -40,6 +46,18 @@ TAMANHO_MB=20
 # Endereço onde o /nucleo/nucos é carregado e seu tamanho máximo
 NUCOS_MEM=0x20000
 NUCOS_MAX=262144          # 256 KiB (0x40000)
+
+# Opções comuns dos módulos do núcleo.
+#   -C target-feature=-sse,-sse2
+#     O núcleo ainda não liga CR4.OSFXSR/OSXMMEXCPT, então qualquer
+#     instrução SSE (xorps, movaps, movdqa...) gera #UD e derruba a CPU
+#     (triple fault). Desligamos SSE no código gerado para garantir que o
+#     compilador use apenas instruções inteiras do i386.
+FLAGS_NUCLEO=(
+    --edition 2021 --target i686-unknown-linux-gnu
+    -C panic=abort -C opt-level=s -C relocation-model=static
+    -C target-feature=-sse,-sse2
+)
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
@@ -93,14 +111,27 @@ if [ "$TAM_C" -le 0 ] || [ "$TAM_C" -gt 61440 ]; then
 fi
 
 # --- 3) Compilar o núcleo (Rust no_std, binário plano) --------------------
+echo "[CosmOS] 3/8 Compilando nucleo/drivers/video/video.rs ..."
+rustc "${FLAGS_NUCLEO[@]}" \
+    --crate-type=lib --emit=obj -o "$TMP/video.o" "$FONTE_VIDEO"
+
+echo "[CosmOS] 3/8 Compilando nucleo/texto.rs ..."
+rustc "${FLAGS_NUCLEO[@]}" \
+    --crate-type=lib --emit=obj -o "$TMP/texto.o" "$FONTE_TEXTO"
+
+echo "[CosmOS] 3/8 Compilando nucleo/memoria/memoria.rs ..."
+rustc "${FLAGS_NUCLEO[@]}" \
+    --crate-type=lib --emit=obj -o "$TMP/memoria.o" "$FONTE_MEMORIA"
+
 echo "[CosmOS] 3/8 Compilando nucleo/nucleo.rs ..."
-rustc --edition 2021 --target i686-unknown-linux-gnu \
-    -C panic=abort -C opt-level=s -C relocation-model=static \
+rustc "${FLAGS_NUCLEO[@]}" \
     --emit=obj -o "$TMP/nucleo.o" "$FONTE_RS"
 
-# O nucleo.ld garante que o _start seja o primeiro byte em 0x20000
+# O nucleo.ld garante que o _start seja o primeiro byte em 0x20000.
+# video.o, texto.o e memoria.o entram junto: o maestro (núcleo) chama
+# video_limpar, texto_escrever e memoria_iniciar.
 ld -m elf_i386 -T "$RAIZ/nucleo/nucleo.ld" --nmagic \
-    -o "$TMP/nucos.elf" "$TMP/nucleo.o"
+    -o "$TMP/nucos.elf" "$TMP/nucleo.o" "$TMP/video.o" "$TMP/texto.o" "$TMP/memoria.o"
 objcopy -O binary "$TMP/nucos.elf" "$NUCOS"
 
 ENTRADA_N="$(nm "$TMP/nucos.elf" | awk '$3 == "_start" { print $1 }')"

@@ -1,18 +1,21 @@
 /* ==========================================================================
- *   CosmOS Beta v0.1 — Construção 0.3.2026
- *   nucleo/nucleo.rs — Núcleo do CosmOS (Nucos)
+ *   CosmOS Beta v0.1 — Construção 0.4.2026
+ *   nucleo/nucleo.rs — Núcleo do CosmOS (Nucos) — o maestro
  * --------------------------------------------------------------------------
  *   Alvo   : x86 32 bits, modo protegido. O inicio procura /nucleo/nucos
  *            no ext4 da imagem, carrega em 0x20000, espera 2 segundos e
  *            salta para cá.
- *   Vídeo  : modo 13h — 320x200, 256 cores (8 bits por pixel)
- *   Estado : limpa a tela e desenha, na primeira linha, à esquerda,
- *            a mensagem "Entrou no Nucos"
+ *
+ *   O núcleo é o MAESTRO do sistema: ele não desenha nem administra a
+ *   memória diretamente. Apenas chama, na ordem certa, os módulos:
+ *     - nucleo/drivers/video/video.rs  → tela (modo 13h)
+ *     - nucleo/texto.rs                → escrita (fonte 8x8)
+ *     - nucleo/memoria.rs              → heap da RAM
  *
  *   Sem biblioteca padrão (#![no_std]): compilado com
- *       rustc --target i686-unknown-none -C panic=abort -C opt-level=s
- *   e linkado como binário plano em 0x20000 (ver copilar.sh). No futuro
- *   outros arquivos .rs entrarão aqui, com um linker de verdade.
+ *       rustc --target i686-unknown-linux-gnu -C panic=abort -C opt-level=s
+ *   e linkado junto com video.o, texto.o e memoria.o como binário plano em
+ *   0x20000 (ver copilar.sh).
  * ========================================================================== */
 
 #![no_std]
@@ -22,14 +25,19 @@ use core::arch::asm;
 use core::panic::PanicInfo;
 use core::ptr::{read, write_volatile};
 
-const LARGURA_TELA: usize = 320;
-const ALTURA_TELA: usize = 200;
-const COR_TEXTO: u8 = 15; /* branco no modo 13h */
-
-/* Memória de vídeo do modo 13h */
-fn video() -> *mut u8 {
-    0xA0000 as *mut u8
+/* Módulos: compilados à parte e linkados junto para formar o nucos. */
+extern "C" {
+    fn video_limpar(cor: u8);
+    fn texto_escrever(texto: *const u8, tamanho: usize, x_inicial: usize, y: usize);
+    fn texto_escrever_numero(valor: usize, x_inicial: usize, y: usize) -> usize;
+    fn memoria_iniciar() -> usize;
 }
+
+const COR_PRETO: u8 = 0;
+
+const MENSAGEM_BOAS_VINDAS: &str = "Entrou no Nucos";
+const MENSAGEM_RAM: &str = "RAM DE ";
+const MENSAGEM_BYTES: &str = " BYTES";
 
 /* Ponto de entrada: o inicio salta para 0x20000, onde o copilar.sh linkou
  * este binário. O #[link_section] joga o _start para .text.startup, que o
@@ -39,9 +47,47 @@ fn video() -> *mut u8 {
 #[no_mangle]
 #[link_section = ".text.startup"]
 pub extern "C" fn _start() -> ! {
-    limpar_tela();
-    desenhar_texto("Entrou no Nucos", 0, 2);
+    iniciar_video();
+
+    let ram = iniciar_memoria();
+    escrever_boas_vindas(ram);
+
     parar();
+}
+
+/* --- Coordenação dos módulos -------------------------------------------- */
+
+fn iniciar_video() {
+    unsafe { video_limpar(COR_PRETO) };
+}
+
+fn iniciar_memoria() -> usize {
+    unsafe { memoria_iniciar() }
+}
+
+fn escrever_boas_vindas(ram: usize) {
+    unsafe {
+        texto_escrever(
+            MENSAGEM_BOAS_VINDAS.as_ptr(),
+            MENSAGEM_BOAS_VINDAS.len(),
+            0,
+            2,
+        );
+
+        if ram > 0 {
+            texto_escrever(MENSAGEM_RAM.as_ptr(), MENSAGEM_RAM.len(), 0, 14);
+
+            let x_numero = MENSAGEM_RAM.len() * 8;
+            let digitos = texto_escrever_numero(ram, x_numero, 14);
+
+            texto_escrever(
+                MENSAGEM_BYTES.as_ptr(),
+                MENSAGEM_BYTES.len(),
+                x_numero + digitos * 8,
+                14,
+            );
+        }
+    }
 }
 
 #[panic_handler]
@@ -53,63 +99,6 @@ fn panico(_: &PanicInfo) -> ! {
 fn parar() -> ! {
     loop {
         unsafe { asm!("hlt", options(nomem, nostack)) }
-    }
-}
-
-fn limpar_tela() {
-    let mut i = 0;
-    while i < LARGURA_TELA * ALTURA_TELA {
-        unsafe { write_volatile(video().add(i), 0) };
-        i += 1;
-    }
-}
-
-/* Fonte 8x8 desenhada à mão, apenas os caracteres da mensagem
- * "Entrou no Nucos" — mesmo estilo do ini/inicio.c.
- * Cada glifo ocupa 8 bytes (8 linhas); os 5 bits mais à esquerda de cada
- * byte são os 5 pixels de largura do caractere. */
-struct Glifo {
-    codigo: u8,
-    linhas: [u8; 8],
-}
-
-const FONTE: [Glifo; 10] = [
-    Glifo { codigo: b' ', linhas: [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00] },
-    Glifo { codigo: b'E', linhas: [0xF8, 0x80, 0x80, 0xF0, 0x80, 0x80, 0xF8, 0x00] },
-    Glifo { codigo: b'N', linhas: [0x88, 0xC8, 0xA8, 0x98, 0x88, 0x88, 0x88, 0x00] },
-    Glifo { codigo: b'c', linhas: [0x00, 0x00, 0x70, 0x88, 0x80, 0x88, 0x70, 0x00] },
-    Glifo { codigo: b'n', linhas: [0x00, 0x00, 0xD8, 0xC8, 0x88, 0x88, 0x88, 0x00] },
-    Glifo { codigo: b'o', linhas: [0x00, 0x00, 0x70, 0x88, 0x88, 0x88, 0x70, 0x00] },
-    Glifo { codigo: b'r', linhas: [0x00, 0x00, 0xD8, 0xC8, 0x80, 0x80, 0x80, 0x00] },
-    Glifo { codigo: b's', linhas: [0x00, 0x00, 0x78, 0x80, 0x70, 0x08, 0xF0, 0x00] },
-    Glifo { codigo: b't', linhas: [0x20, 0x20, 0xF8, 0x20, 0x20, 0x28, 0x18, 0x00] },
-    Glifo { codigo: b'u', linhas: [0x00, 0x00, 0x88, 0x88, 0x88, 0x98, 0x68, 0x00] },
-];
-
-fn achar_glifo(codigo: u8) -> Option<&'static [u8; 8]> {
-    for glifo in FONTE.iter() {
-        if glifo.codigo == codigo {
-            return Some(&glifo.linhas);
-        }
-    }
-    None
-}
-
-fn desenhar_texto(texto: &str, x_inicial: usize, y: usize) {
-    let mut x = x_inicial;
-
-    for &codigo in texto.as_bytes() {
-        if let Some(linhas) = achar_glifo(codigo) {
-            for (linha, &bits) in linhas.iter().enumerate() {
-                for coluna in 0..8 {
-                    if bits & (0x80 >> coluna) != 0 {
-                        let pos = (y + linha) * LARGURA_TELA + x + coluna;
-                        unsafe { write_volatile(video().add(pos), COR_TEXTO) };
-                    }
-                }
-            }
-        }
-        x += 8;
     }
 }
 
