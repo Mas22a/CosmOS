@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==========================================================================
-#   CosmOS Beta v0.1 — Construção 0.4.2026
+#   CosmOS Beta v0.1 — Construção 0.5.2026
 #   copilar.sh — compila os estágios de boot e gera a imagem CosmOS.img
 # --------------------------------------------------------------------------
 #   O que este script faz:
@@ -8,9 +8,12 @@
 #     2) Compila ini/inicio.c  →  ini/inicio.o (objeto ELF)
 #                                →  ini/inicio   (binário plano em 0x10000)
 #     3) Compila nucleo/drivers/video/video.rs (driver de vídeo),
+#        nucleo/drivers/tempo/pit.rs (driver de tempo — PIT),
+#        nucleo/drivers/tempo/rtc.rs (relógio — data/hora na tela),
 #        nucleo/texto.rs (driver de texto), nucleo/memoria/memoria.rs
-#        (gerenciador de RAM) e nucleo/nucleo.rs, linka os quatro →
-#        nucleo/nucos (binário plano em 0x20000)
+#        (gerenciador de RAM) e nucleo/nucleo.rs — cada um vira um .o
+#        salvo ao lado da fonte — e linka os seis → nucleo/nucos (binário
+#        plano em 0x20000)
 #     4) Cria a imagem vazia CosmOS.img com 20 MB
 #     5) Formata a imagem em ext4 (blocos de 1 KiB, inodes de 256 bytes)
 #     6) Cria somente as pastas inicio/ e nucleo/ dentro da imagem e coloca
@@ -36,9 +39,17 @@ FONTE_C="$RAIZ/ini/inicio.c"
 OBJ_C="$RAIZ/ini/inicio.o"
 BIN_C="$RAIZ/ini/inicio"
 FONTE_RS="$RAIZ/nucleo/nucleo.rs"
+OBJ_NUCLEO="$RAIZ/nucleo/nucleo.o"
 FONTE_VIDEO="$RAIZ/nucleo/drivers/video/video.rs"
+OBJ_VIDEO="$RAIZ/nucleo/drivers/video/video.o"
+FONTE_PIT="$RAIZ/nucleo/drivers/tempo/pit.rs"
+OBJ_PIT="$RAIZ/nucleo/drivers/tempo/pit.o"
+FONTE_RTC="$RAIZ/nucleo/drivers/tempo/rtc.rs"
+OBJ_RTC="$RAIZ/nucleo/drivers/tempo/rtc.o"
 FONTE_TEXTO="$RAIZ/nucleo/texto.rs"
+OBJ_TEXTO="$RAIZ/nucleo/texto.o"
 FONTE_MEMORIA="$RAIZ/nucleo/memoria/memoria.rs"
+OBJ_MEMORIA="$RAIZ/nucleo/memoria/memoria.o"
 NUCOS="$RAIZ/nucleo/nucos"
 IMG="$RAIZ/CosmOS.img"
 TAMANHO_MB=20
@@ -111,27 +122,38 @@ if [ "$TAM_C" -le 0 ] || [ "$TAM_C" -gt 61440 ]; then
 fi
 
 # --- 3) Compilar o núcleo (Rust no_std, binário plano) --------------------
+# Cada .o fica salvo ao lado da sua fonte (nucleo/video.o, nucleo/pit.o...),
+# igual ao ini/inicio.o — só o .elf intermediário vai para $TMP.
 echo "[CosmOS] 3/8 Compilando nucleo/drivers/video/video.rs ..."
 rustc "${FLAGS_NUCLEO[@]}" \
-    --crate-type=lib --emit=obj -o "$TMP/video.o" "$FONTE_VIDEO"
+    --crate-type=lib --emit=obj -o "$OBJ_VIDEO" "$FONTE_VIDEO"
+
+echo "[CosmOS] 3/8 Compilando nucleo/drivers/tempo/pit.rs ..."
+rustc "${FLAGS_NUCLEO[@]}" \
+    --crate-type=lib --emit=obj -o "$OBJ_PIT" "$FONTE_PIT"
+
+echo "[CosmOS] 3/8 Compilando nucleo/drivers/tempo/rtc.rs ..."
+rustc "${FLAGS_NUCLEO[@]}" \
+    --crate-type=lib --emit=obj -o "$OBJ_RTC" "$FONTE_RTC"
 
 echo "[CosmOS] 3/8 Compilando nucleo/texto.rs ..."
 rustc "${FLAGS_NUCLEO[@]}" \
-    --crate-type=lib --emit=obj -o "$TMP/texto.o" "$FONTE_TEXTO"
+    --crate-type=lib --emit=obj -o "$OBJ_TEXTO" "$FONTE_TEXTO"
 
 echo "[CosmOS] 3/8 Compilando nucleo/memoria/memoria.rs ..."
 rustc "${FLAGS_NUCLEO[@]}" \
-    --crate-type=lib --emit=obj -o "$TMP/memoria.o" "$FONTE_MEMORIA"
+    --crate-type=lib --emit=obj -o "$OBJ_MEMORIA" "$FONTE_MEMORIA"
 
 echo "[CosmOS] 3/8 Compilando nucleo/nucleo.rs ..."
 rustc "${FLAGS_NUCLEO[@]}" \
-    --emit=obj -o "$TMP/nucleo.o" "$FONTE_RS"
+    --emit=obj -o "$OBJ_NUCLEO" "$FONTE_RS"
 
 # O nucleo.ld garante que o _start seja o primeiro byte em 0x20000.
-# video.o, texto.o e memoria.o entram junto: o maestro (núcleo) chama
-# video_limpar, texto_escrever e memoria_iniciar.
+# video.o, texto.o, memoria.o, pit.o e rtc.o entram junto: o maestro
+# (núcleo) chama video_limpar, texto_escrever, memoria_iniciar,
+# pit_iniciar/pit_esperar_ms e rtc_iniciar/rtc_atualizar.
 ld -m elf_i386 -T "$RAIZ/nucleo/nucleo.ld" --nmagic \
-    -o "$TMP/nucos.elf" "$TMP/nucleo.o" "$TMP/video.o" "$TMP/texto.o" "$TMP/memoria.o"
+    -o "$TMP/nucos.elf" "$OBJ_NUCLEO" "$OBJ_VIDEO" "$OBJ_TEXTO" "$OBJ_MEMORIA" "$OBJ_PIT" "$OBJ_RTC"
 objcopy -O binary "$TMP/nucos.elf" "$NUCOS"
 
 ENTRADA_N="$(nm "$TMP/nucos.elf" | awk '$3 == "_start" { print $1 }')"

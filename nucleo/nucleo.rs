@@ -1,5 +1,5 @@
 /* ==========================================================================
- *   CosmOS Beta v0.1 — Construção 0.4.2026
+ *   CosmOS Beta v0.1 — Construção 0.5.2026
  *   nucleo/nucleo.rs — Núcleo do CosmOS (Nucos) — o maestro
  * --------------------------------------------------------------------------
  *   Alvo   : x86 32 bits, modo protegido. O inicio procura /nucleo/nucos
@@ -9,13 +9,21 @@
  *   O núcleo é o MAESTRO do sistema: ele não desenha nem administra a
  *   memória diretamente. Apenas chama, na ordem certa, os módulos:
  *     - nucleo/drivers/video/video.rs  → tela (modo 13h)
+ *     - nucleo/drivers/tempo/pit.rs    → tempo (PIT canal 0)
+ *     - nucleo/drivers/tempo/rtc.rs    → relógio (RTC, data e hora na tela)
  *     - nucleo/texto.rs                → escrita (fonte 8x8)
  *     - nucleo/memoria.rs              → heap da RAM
  *
+ *   Layout das linhas (fonte 8x8, folga de 12 px):
+ *     y =  2 → "Entrou no Nucos"          (1ª linha)
+ *     y = 14 → data à esquerda | hora      (2ª linha, rtc.rs)
+ *              à direita, atualizando sozinha
+ *     y = 26 → "RAM DE <bytes> BYTES"      (3ª linha)
+ *
  *   Sem biblioteca padrão (#![no_std]): compilado com
  *       rustc --target i686-unknown-linux-gnu -C panic=abort -C opt-level=s
- *   e linkado junto com video.o, texto.o e memoria.o como binário plano em
- *   0x20000 (ver copilar.sh).
+ *   e linkado junto com video.o, texto.o, memoria.o, pit.o e rtc.o como
+ *   binário plano em 0x20000 (ver copilar.sh).
  * ========================================================================== */
 
 #![no_std]
@@ -31,6 +39,10 @@ extern "C" {
     fn texto_escrever(texto: *const u8, tamanho: usize, x_inicial: usize, y: usize);
     fn texto_escrever_numero(valor: usize, x_inicial: usize, y: usize) -> usize;
     fn memoria_iniciar() -> usize;
+    fn pit_iniciar() -> u32;
+    fn pit_esperar_ms(ms: u32);
+    fn rtc_iniciar();
+    fn rtc_atualizar();
 }
 
 const COR_PRETO: u8 = 0;
@@ -38,6 +50,14 @@ const COR_PRETO: u8 = 0;
 const MENSAGEM_BOAS_VINDAS: &str = "Entrou no Nucos";
 const MENSAGEM_RAM: &str = "RAM DE ";
 const MENSAGEM_BYTES: &str = " BYTES";
+
+/* Linhas da tela (12 px de folga entre elas). */
+const LINHA_BOAS_VINDAS: usize = 2;
+const LINHA_RAM: usize = 26; /* a 2ª (y = 14) é da data/hora (rtc.rs) */
+
+/* Quantas vezes por segundo a hora é relida no RTC. 250 ms detecta a
+ * virada do segundo rápido e deixa a contagem estável. */
+const INTERVALO_RELOGIO_MS: u32 = 250;
 
 /* Ponto de entrada: o inicio salta para 0x20000, onde o copilar.sh linkou
  * este binário. O #[link_section] joga o _start para .text.startup, que o
@@ -50,9 +70,11 @@ pub extern "C" fn _start() -> ! {
     iniciar_video();
 
     let ram = iniciar_memoria();
+    iniciar_tempo();
     escrever_boas_vindas(ram);
+    iniciar_relogio();
 
-    parar();
+    laço_do_relogio();
 }
 
 /* --- Coordenação dos módulos -------------------------------------------- */
@@ -65,27 +87,53 @@ fn iniciar_memoria() -> usize {
     unsafe { memoria_iniciar() }
 }
 
+/* Liga o PIT no modo periódico (100 Hz). É mudo de propósito: o retorno
+ * (a frequência real) fica descartado — nada é escrito na tela aqui. */
+fn iniciar_tempo() {
+    unsafe {
+        let _hz = pit_iniciar();
+    }
+}
+
 fn escrever_boas_vindas(ram: usize) {
     unsafe {
         texto_escrever(
             MENSAGEM_BOAS_VINDAS.as_ptr(),
             MENSAGEM_BOAS_VINDAS.len(),
             0,
-            2,
+            LINHA_BOAS_VINDAS,
         );
 
         if ram > 0 {
-            texto_escrever(MENSAGEM_RAM.as_ptr(), MENSAGEM_RAM.len(), 0, 14);
+            texto_escrever(MENSAGEM_RAM.as_ptr(), MENSAGEM_RAM.len(), 0, LINHA_RAM);
 
             let x_numero = MENSAGEM_RAM.len() * 8;
-            let digitos = texto_escrever_numero(ram, x_numero, 14);
+            let digitos = texto_escrever_numero(ram, x_numero, LINHA_RAM);
 
             texto_escrever(
                 MENSAGEM_BYTES.as_ptr(),
                 MENSAGEM_BYTES.len(),
                 x_numero + digitos * 8,
-                14,
+                LINHA_RAM,
             );
+        }
+    }
+}
+
+/* A primeira leitura do RTC desenha a data (esquerda) e a hora (direita)
+ * na segunda linha — aí a tela já tem as três linhas prontas. */
+fn iniciar_relogio() {
+    unsafe { rtc_iniciar() };
+}
+
+/* Laço do relógio: espera um pouco no PIT (por polling, a CPU está com
+ * cli) e relê o RTC. O rtc_atualizar() só redesenha o que mudou, então a
+ * hora vira sozinha sem piscar a tela e sem nunca mais sair daqui. */
+fn laço_do_relogio() -> ! {
+    loop {
+        unsafe {
+            pit_esperar_ms(INTERVALO_RELOGIO_MS);
+            rtc_atualizar();
         }
     }
 }

@@ -1,4 +1,4 @@
-# CosmOS Beta v0.1 — Construção 0.4.2026
+# CosmOS Beta v0.1 — Construção 0.5.2026
 
 Sistema operacional construído do zero, começando pelo zero absoluto: o **primeiro
 estágio de boot** (Assembly/NASM), o **segundo estágio** (C freestanding) e o
@@ -6,8 +6,8 @@ estágio de boot** (Assembly/NASM), o **segundo estágio** (C freestanding) e o
 
 > **Regra do projeto:** nenhum arquivo ou pasta é criado ou alterado sem permissão
 > do desenvolvedor. Os únicos artefatos gerados automaticamente são os produtos do
-> próprio `copilar.sh` (`ini/inimin`, `ini/inicio.o`, `ini/inicio`, `nucleo/nucos` e
-> `CosmOS.img`).
+> próprio `copilar.sh` (`ini/inimin`, os `.o` (`ini/inicio.o` e os seis do núcleo),
+> `ini/inicio`, `nucleo/nucos` e `CosmOS.img`).
 
 ---
 
@@ -26,6 +26,9 @@ Desenvolvimento/
 │   ├── memoria/
 │   │   └── memoria.rs  # Gerenciador de memória RAM (heap) — FONTE
 │   ├── drivers/
+│   │   ├── tempo/
+│   │   │   ├── pit.rs   # Driver de tempo (PIT canal 0) — mudo — FONTE
+│   │   │   └── rtc.rs   # Relógio de tempo real (RTC) — data/hora na tela — FONTE
 │   │   └── video/
 │   │       └── video.rs # Driver de vídeo (modo 13h) — FONTE
 │   └── nucleo.ld       # Linker script: _start é o primeiro byte em 0x20000
@@ -36,11 +39,17 @@ Desenvolvimento/
 Gerados pelo `copilar.sh` (não versionados à mão):
 
 ```
-├── ini/inimin          # Binário do inimin.asm (1024 bytes = 2 setores)
-├── ini/inicio.o        # Objeto ELF gerado a partir de inicio.c
-├── ini/inicio          # Binário plano do inicio.c (carregado em 0x10000)
-├── nucleo/nucos        # Binário plano do nucleo.rs + drivers (0x20000)
-└── CosmOS.img          # Imagem de 20 MB, ext4, pronta para bootar no QEMU
+├── ini/inimin                    # Binário do inimin.asm (1024 bytes = 2 setores)
+├── ini/inicio.o                  # Objeto ELF gerado a partir de inicio.c
+├── ini/inicio                    # Binário plano do inicio.c (carregado em 0x10000)
+├── nucleo/nucleo.o               # Objeto ELF do nucleo.rs (maestro)
+├── nucleo/texto.o                # Objeto ELF do texto.rs
+├── nucleo/memoria/memoria.o      # Objeto ELF do memoria.rs
+├── nucleo/drivers/video/video.o  # Objeto ELF do video.rs
+├── nucleo/drivers/tempo/pit.o    # Objeto ELF do pit.rs
+├── nucleo/drivers/tempo/rtc.o    # Objeto ELF do rtc.rs
+├── nucleo/nucos                  # Binário plano dos seis .o linkados (0x20000)
+└── CosmOS.img                    # Imagem de 20 MB, ext4, pronta para bootar no QEMU
 ```
 
 ---
@@ -104,15 +113,23 @@ qemu-system-x86_64 -drive format=raw,file=CosmOS.img,if=ide -boot order=c -m 128
 **totalmente preto** e, na **primeira linha, centralizada**, a mensagem:
 
 ```
-CosmOS Beta v0.1 Construção 0.4.2026
+CosmOS Beta v0.1 Construção 0.5.2026
 ```
 
 **2 segundos depois**, o segundo estágio passa o controle para o núcleo, que
-**limpa a tela** e desenha na **primeira linha, à esquerda**:
+**limpa a tela** e desenha três linhas à esquerda (`y = 2`, `y = 14` e `y = 26`):
 
 ```
-Entrou no Nucos
+Entrou no Nucos                ← 1ª linha (y =  2)
+27/10/2026              10:40:45   ← 2ª linha (y = 14): data à esquerda,
+                                   hora à direita — e a HORA se atualiza
+                                   sozinha, sem ninguém tocar na tela
+RAM DE 134217728 BYTES         ← 3ª linha (y = 26)
 ```
+
+A **2ª linha é viva**: o núcleo fica em laço, esperando 250 ms no PIT (por
+polling, a CPU está com `cli`) e relendo o RTC. Só os caracteres que mudaram
+são redesenhados — o resto da tela não pisca.
 
 ---
 
@@ -132,6 +149,11 @@ BIOS
                                               e pede ao texto.rs para
                                               escrever "Entrou no Nucos"
                                               (que desenha via video.rs)
+                                              └─> rtc.rs desenha data (esq.)
+                                                  e hora (dir.) na 2ª linha
+                                                  └─> laço: espera 250 ms
+                                                      no PIT e relê o RTC —
+                                                      a hora corre sozinha
 ```
 
 ### Mapa de memória (modo protegido)
@@ -207,19 +229,28 @@ binário; o `copilar.sh` confere com `nm` que ele está em `0x00010000`.
 
 | Item | Valor |
 |---|---|
-| Arquivos | `nucleo/nucleo.rs` (maestro), `nucleo/drivers/video/video.rs` (vídeo), `nucleo/texto.rs` (texto) e `nucleo/memoria/memoria.rs` (RAM) |
+| Arquivos | `nucleo/nucleo.rs` (maestro), `nucleo/drivers/video/video.rs` (vídeo), `nucleo/drivers/tempo/pit.rs` (tempo), `nucleo/drivers/tempo/rtc.rs` (relógio), `nucleo/texto.rs` (texto) e `nucleo/memoria/memoria.rs` (RAM) |
 | Binário | `nucleo/nucos` (binário plano, sem ELF) |
 | Endereço de carga | **0x20000** (o `_start` fica exatamente no primeiro byte) |
 | Arquitetura | **x86 32 bits, modo protegido** |
 | Biblioteca | nenhuma — `#![no_std]`, sem libc |
 | Compilação | `rustc --target i686-unknown-linux-gnu -C panic=abort -C target-feature=-sse,-sse2 --emit=obj` para cada `.rs` |
-| Linkagem | `ld -m elf_i386 -T nucleo/nucleo.ld --nmagic` (nucleo.o + video.o + texto.o + memoria.o) + `objcopy -O binary` |
+| Linkagem | `ld -m elf_i386 -T nucleo/nucleo.ld --nmagic` (nucleo.o + video.o + pit.o + rtc.o + texto.o + memoria.o) + `objcopy -O binary` |
 | Vídeo | **Modo 13h: 320×200, 256 cores** |
 
 O `nucleo.rs` é só o **maestro**: não desenha nem administra memória, apenas
 chama os módulos na ordem certa.
 
 - `video.rs` exporta `video_limpar(cor)` e `video_pixel(x, y, cor)`;
+- `pit.rs` exporta `pit_iniciar()`, `pit_esperar_ms(ms)`, `pit_esperar_ticks(ticks)`
+  e `pit_ler_contador()` — programa o PIT canal 0 (portas `0x43`/`0x40`, base de
+  1193182 Hz) e espera por polling; é **mudo**, não escreve nada na tela;
+- `rtc.rs` exporta `rtc_iniciar()` e `rtc_atualizar()` — lê o RTC do CMOS
+  (portas `0x70`/`0x71`, esperando o bit **UIP** do status A e convertendo
+  BCD/12 h conforme o status B) e desenha **data** (`DD/MM/AAAA`, encostada
+  na esquerda) e **hora** (`HH:MM:SS`, encostada na direita) na segunda linha;
+  redesenha **apenas os caracteres que mudaram**, apagando a célula de 8×8
+  antes (sem rabiscos e sem piscar o resto da tela);
 - `texto.rs` exporta `texto_escrever(texto, tamanho, x, y)` e
   `texto_escrever_numero(valor, x, y)`, guarda a fonte 8×8 (dígitos, letras e
   minúsculas do alfabeto usado) e desenha cada caractere chamando `video_pixel`;
@@ -231,10 +262,17 @@ O que o maestro faz:
 1. **inicia o vídeo**: limpa a tela inteira em preto (`video_limpar(0)`);
 2. **inicia a memória**: chama `memoria_iniciar()`, que lê o mapa **E820**
    deixado pelo primeiro estágio e monta um heap linear a partir de **1 MiB**;
-3. manda escrever **"Entrou no Nucos"** (`x = 0`, `y = 2`) e, na segunda linha
-   (`y = 14`), **`RAM DE <bytes> BYTES`** com o tamanho real da RAM instalada,
+3. **inicia o tempo**: chama `pit_iniciar()`, que deixa o canal 0 do PIT em
+   modo periódico a **100 Hz** — sem desenhar ou imprimir nada na tela;
+4. manda escrever **"Entrou no Nucos"** (`x = 0`, `y = 2`) e, na terceira linha
+   (`y = 26`), **`RAM DE <bytes> BYTES`** com o tamanho real da RAM instalada,
    usando `texto_escrever_numero()`;
-4. entra em espera infinita (`hlt`).
+5. **inicia o relógio**: chama `rtc_iniciar()`, que faz a primeira leitura do
+   RTC e desenha **data à esquerda** e **hora à direita** na segunda linha
+   (`y = 14`);
+6. entra no **laço do relógio**: `pit_esperar_ms(250)` + `rtc_atualizar()`,
+   para sempre — é assim que a hora se atualiza sozinha na tela (o `hlt` e a
+   espera infinita saíram de cena).
 
 #### Como o `memoria.rs` gerencia a RAM
 
@@ -273,9 +311,11 @@ somado na linha do `ld`; o `nucleo.ld` continua sendo a base da linkagem.
    linka em `0x10000` (`ld -e _start`), converte para binário plano com
    `objcopy` e confere a entrada `_start` com `nm`;
 3. **Compila** `nucleo/nucleo.rs` e os módulos `nucleo/drivers/video/video.rs`,
+   `nucleo/drivers/tempo/pit.rs`, `nucleo/drivers/tempo/rtc.rs`,
    `nucleo/texto.rs` e `nucleo/memoria/memoria.rs` com `rustc` (`#![no_std]`,
-   `panic=abort`, `relocation-model=static`) em objetos separados, linka os
-   quatro com o `nucleo.ld` em `0x20000`, converte para binário plano e confere
+   `panic=abort`, `relocation-model=static`) em objetos separados — cada `.o`
+   fica salvo ao lado da sua fonte, igual ao `ini/inicio.o` —, linka os
+   seis com o `nucleo.ld` em `0x20000`, converte para binário plano e confere
    o `_start` com `nm`;
 4. **Cria** a `CosmOS.img` vazia com exatamente **20 MB** (`dd`);
 5. **Formata** em **ext4** com rótulo `CosmOS`, blocos de **1 KiB** e inodes de
@@ -318,16 +358,21 @@ pixels das capturas):
   instrução SSE/AVX no núcleo. O `copilar.sh` compila os módulos com
   `-C target-feature=-sse,-sse2` justamente para garantir isso (um `xorps`/
   `movaps` gerado pelo `rustc` derrubava a CPU em *triple fault*);
-- **t ≈ 1 s:** mensagem **"CosmOS Beta v0.1 Construção 0.4.2026"** centralizada,
+- **t ≈ 1 s:** mensagem **"CosmOS Beta v0.1 Construção 0.5.2026"** centralizada,
   ocupando `x = 16..300` e `y = 2..9` (primeira linha);
 - **t ≈ 4 s:** tela **limpa**, mensagem **"Entrou no Nucos"** na primeira linha
   à esquerda, ocupando `x = 0..116` e `y = 2..8` — o controle chegou ao núcleo;
-- **memória:** a segunda linha (`y = 14`) mostra o tamanho **real** da RAM em
+- **memória:** a terceira linha (`y = 26`) mostra o tamanho **real** da RAM em
   bytes, lido do mapa E820: com `-m 64M` → **`RAM DE 67108864 BYTES`**,
   com `-m 128M` → **`RAM DE 134217728 BYTES`** e com `-m 256M` →
-  **`RAM DE 268435456 BYTES`**.
+  **`RAM DE 268435456 BYTES`**;
+- **relógio:** a segunda linha (`y = 14`) mostra a **data à esquerda**
+  (`DD/MM/AAAA`) e a **hora à direita** (`HH:MM:SS`) lidas do RTC — conferido
+  no QEMU com dois `screendump`s: os segundos avançam sozinhos e **só os
+  caracteres que mudam** são redesenhados (o restante da tela fica intacto,
+  byte a byte). O horário bate com o UTC do host.
 
-Bugs encontrados e corrigidos durante a Construção 0.4.2026:
+Bugs encontrados e corrigidos durante a Construção 0.5.2026:
 
 1. `u8 i; ... i < 256` em `carrega_inode` virava **loop infinito** (o `u8` dá a
    volta antes de chegar a 256) — corrigido para `u16`;
@@ -337,4 +382,14 @@ Bugs encontrados e corrigidos durante a Construção 0.4.2026:
    `texto_escrever_numero`. Com `CR4.OSFXSR` desligado, a instrução SSE gera
    `#UD` e a CPU entrava em *triple fault* (a tela ficava no "Entrou no Nucos"
    e o QEMU reiniciava) — corrigido compilando o núcleo com
-   `-C target-feature=-sse,-sse2`.
+   `-C target-feature=-sse,-sse2`;
+4. `anterior[i]` no `rtc.rs` fazia o `ld` falhar com *undefined reference to
+   `core::panicking::panic_bounds_check`* — o indexamento normal do Rust gera
+   checagem de limites, e o runtime de pânico não existe na linkagem plana do
+   nucos — corrigido com `get_unchecked()`;
+5. o **status B** do RTC foi lido com os bits errados (usei bit 0 como BCD e
+   bit 2 como 24 h) e a tela mostrava **`00/00/2038 00:56`**: na MC146818 o
+   bit 2 é o **DM** (1 = binário, 0 = BCD) e o bit 1 é o **24 h/12 h** — com
+   BCD interpretado como binário, `27` → 39 estourava o limite e virava `00`
+   e o ano `0x26` virava `38` ("2038"). Corrigido lendo os bits certos — a
+   data passou a mostrar `27/10/2026` com a hora certa do host.
