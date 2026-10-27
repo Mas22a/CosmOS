@@ -1,5 +1,5 @@
 /* ==========================================================================
- *   CosmOS Beta v0.1 — Construção 0.5.2026
+ *   CosmOS Beta v0.1 — Construção 0.6.2026
  *   nucleo/texto.rs — Driver de texto do CosmOS
  * --------------------------------------------------------------------------
  *   Alvo   : x86 32 bits, modo protegido.

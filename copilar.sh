@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==========================================================================
-#   CosmOS Beta v0.1 — Construção 0.5.2026
+#   CosmOS Beta v0.1 — Construção 0.6.2026
 #   copilar.sh — compila os estágios de boot e gera a imagem CosmOS.img
 # --------------------------------------------------------------------------
 #   O que este script faz:
@@ -10,9 +10,11 @@
 #     3) Compila nucleo/drivers/video/video.rs (driver de vídeo),
 #        nucleo/drivers/tempo/pit.rs (driver de tempo — PIT),
 #        nucleo/drivers/tempo/rtc.rs (relógio — data/hora na tela),
+#        nucleo/drivers/mouse/ps2.rs (mouse PS/2 — mudo, sem desenhar),
+#        nucleo/cpu/idt.rs (IDT — interrupções de hardware),
 #        nucleo/texto.rs (driver de texto), nucleo/memoria/memoria.rs
 #        (gerenciador de RAM) e nucleo/nucleo.rs — cada um vira um .o
-#        salvo ao lado da fonte — e linka os seis → nucleo/nucos (binário
+#        salvo ao lado da fonte — e linka os oito → nucleo/nucos (binário
 #        plano em 0x20000)
 #     4) Cria a imagem vazia CosmOS.img com 20 MB
 #     5) Formata a imagem em ext4 (blocos de 1 KiB, inodes de 256 bytes)
@@ -50,6 +52,10 @@ FONTE_TEXTO="$RAIZ/nucleo/texto.rs"
 OBJ_TEXTO="$RAIZ/nucleo/texto.o"
 FONTE_MEMORIA="$RAIZ/nucleo/memoria/memoria.rs"
 OBJ_MEMORIA="$RAIZ/nucleo/memoria/memoria.o"
+FONTE_MOUSE="$RAIZ/nucleo/drivers/mouse/ps2.rs"
+OBJ_MOUSE="$RAIZ/nucleo/drivers/mouse/ps2.o"
+FONTE_IDT="$RAIZ/nucleo/cpu/idt.rs"
+OBJ_IDT="$RAIZ/nucleo/cpu/idt.o"
 NUCOS="$RAIZ/nucleo/nucos"
 IMG="$RAIZ/CosmOS.img"
 TAMANHO_MB=20
@@ -144,16 +150,24 @@ echo "[CosmOS] 3/8 Compilando nucleo/memoria/memoria.rs ..."
 rustc "${FLAGS_NUCLEO[@]}" \
     --crate-type=lib --emit=obj -o "$OBJ_MEMORIA" "$FONTE_MEMORIA"
 
+echo "[CosmOS] 3/8 Compilando nucleo/drivers/mouse/ps2.rs ..."
+rustc "${FLAGS_NUCLEO[@]}" \
+    --crate-type=lib --emit=obj -o "$OBJ_MOUSE" "$FONTE_MOUSE"
+
+echo "[CosmOS] 3/8 Compilando nucleo/cpu/idt.rs ..."
+rustc "${FLAGS_NUCLEO[@]}" \
+    --crate-type=lib --emit=obj -o "$OBJ_IDT" "$FONTE_IDT"
+
 echo "[CosmOS] 3/8 Compilando nucleo/nucleo.rs ..."
 rustc "${FLAGS_NUCLEO[@]}" \
     --emit=obj -o "$OBJ_NUCLEO" "$FONTE_RS"
 
 # O nucleo.ld garante que o _start seja o primeiro byte em 0x20000.
-# video.o, texto.o, memoria.o, pit.o e rtc.o entram junto: o maestro
+# video.o, texto.o, memoria.o, pit.o, rtc.o, mouse.o e idt.o entram junto: o maestro
 # (núcleo) chama video_limpar, texto_escrever, memoria_iniciar,
-# pit_iniciar/pit_esperar_ms e rtc_iniciar/rtc_atualizar.
+# pit_iniciar, rtc_iniciar/rtc_atualizar, mouse_ps2_*, idt_iniciar/idt_esperar_ms.
 ld -m elf_i386 -T "$RAIZ/nucleo/nucleo.ld" --nmagic \
-    -o "$TMP/nucos.elf" "$OBJ_NUCLEO" "$OBJ_VIDEO" "$OBJ_TEXTO" "$OBJ_MEMORIA" "$OBJ_PIT" "$OBJ_RTC"
+    -o "$TMP/nucos.elf" "$OBJ_NUCLEO" "$OBJ_VIDEO" "$OBJ_TEXTO" "$OBJ_MEMORIA" "$OBJ_PIT" "$OBJ_RTC" "$OBJ_MOUSE" "$OBJ_IDT"
 objcopy -O binary "$TMP/nucos.elf" "$NUCOS"
 
 ENTRADA_N="$(nm "$TMP/nucos.elf" | awk '$3 == "_start" { print $1 }')"

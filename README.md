@@ -1,4 +1,4 @@
-# CosmOS Beta v0.1 — Construção 0.5.2026
+# CosmOS Beta v0.1 — Construção 0.6.2026
 
 Sistema operacional construído do zero, começando pelo zero absoluto: o **primeiro
 estágio de boot** (Assembly/NASM), o **segundo estágio** (C freestanding) e o
@@ -6,7 +6,7 @@ estágio de boot** (Assembly/NASM), o **segundo estágio** (C freestanding) e o
 
 > **Regra do projeto:** nenhum arquivo ou pasta é criado ou alterado sem permissão
 > do desenvolvedor. Os únicos artefatos gerados automaticamente são os produtos do
-> próprio `copilar.sh` (`ini/inimin`, os `.o` (`ini/inicio.o` e os seis do núcleo),
+> próprio `copilar.sh` (`ini/inimin`, os `.o` (`ini/inicio.o` e os oito do núcleo),
 > `ini/inicio`, `nucleo/nucos` e `CosmOS.img`).
 
 ---
@@ -23,12 +23,16 @@ Desenvolvimento/
 ├── nucleo/
 │   ├── nucleo.rs       # Núcleo/maestro — coordena os módulos — FONTE
 │   ├── texto.rs        # Driver de texto (fonte 8x8) — FONTE
+│   ├── cpu/
+│   │   └── idt.rs      # IDT — interrupções de hardware (timer IRQ0) — FONTE
 │   ├── memoria/
 │   │   └── memoria.rs  # Gerenciador de memória RAM (heap) — FONTE
 │   ├── drivers/
 │   │   ├── tempo/
 │   │   │   ├── pit.rs   # Driver de tempo (PIT canal 0) — mudo — FONTE
 │   │   │   └── rtc.rs   # Relógio de tempo real (RTC) — data/hora na tela — FONTE
+│   │   ├── mouse/
+│   │   │   └── ps2.rs   # Driver de mouse PS/2 — MUDO (não desenha) — FONTE
 │   │   └── video/
 │   │       └── video.rs # Driver de vídeo (modo 13h) — FONTE
 │   └── nucleo.ld       # Linker script: _start é o primeiro byte em 0x20000
@@ -48,7 +52,9 @@ Gerados pelo `copilar.sh` (não versionados à mão):
 ├── nucleo/drivers/video/video.o  # Objeto ELF do video.rs
 ├── nucleo/drivers/tempo/pit.o    # Objeto ELF do pit.rs
 ├── nucleo/drivers/tempo/rtc.o    # Objeto ELF do rtc.rs
-├── nucleo/nucos                  # Binário plano dos seis .o linkados (0x20000)
+├── nucleo/drivers/mouse/ps2.o    # Objeto ELF do ps2.rs
+├── nucleo/cpu/idt.o              # Objeto ELF do idt.rs
+├── nucleo/nucos                  # Binário plano dos oito .o linkados (0x20000)
 └── CosmOS.img                    # Imagem de 20 MB, ext4, pronta para bootar no QEMU
 ```
 
@@ -113,7 +119,7 @@ qemu-system-x86_64 -drive format=raw,file=CosmOS.img,if=ide -boot order=c -m 128
 **totalmente preto** e, na **primeira linha, centralizada**, a mensagem:
 
 ```
-CosmOS Beta v0.1 Construção 0.5.2026
+CosmOS Beta v0.1 Construção 0.6.2026
 ```
 
 **2 segundos depois**, o segundo estágio passa o controle para o núcleo, que
@@ -127,9 +133,10 @@ Entrou no Nucos                ← 1ª linha (y =  2)
 RAM DE 134217728 BYTES         ← 3ª linha (y = 26)
 ```
 
-A **2ª linha é viva**: o núcleo fica em laço, esperando 250 ms no PIT (por
-polling, a CPU está com `cli`) e relendo o RTC. Só os caracteres que mudaram
-são redesenhados — o resto da tela não pisca.
+A **2ª linha é viva**: o núcleo fica em laço, **dormindo com `hlt`** até a
+**interrupção do timer (IRQ0)** acordá-lo a cada 250 ms (`idt_esperar_ms`) e
+relendo o RTC. Só os caracteres que mudaram são redesenhados — o resto da tela
+não pisca. A CPU não fica em *polling*: ela descansa até o IRQ0 chegar.
 
 ---
 
@@ -151,9 +158,14 @@ BIOS
                                               (que desenha via video.rs)
                                               └─> rtc.rs desenha data (esq.)
                                                   e hora (dir.) na 2ª linha
-                                                  └─> laço: espera 250 ms
-                                                      no PIT e relê o RTC —
-                                                      a hora corre sozinha
+                                                  └─> idt.rs monta a IDT,
+                                                      carrega com LIDT e
+                                                      dá STI (liga as
+                                                      interrupções)
+                                                      └─> laço: idt_esperar_ms
+                                                          (hlt até o IRQ0 do
+                                                          timer) e relê o RTC —
+                                                          a hora corre sozinha
 ```
 
 ### Mapa de memória (modo protegido)
@@ -229,13 +241,13 @@ binário; o `copilar.sh` confere com `nm` que ele está em `0x00010000`.
 
 | Item | Valor |
 |---|---|
-| Arquivos | `nucleo/nucleo.rs` (maestro), `nucleo/drivers/video/video.rs` (vídeo), `nucleo/drivers/tempo/pit.rs` (tempo), `nucleo/drivers/tempo/rtc.rs` (relógio), `nucleo/texto.rs` (texto) e `nucleo/memoria/memoria.rs` (RAM) |
+| Arquivos | `nucleo/nucleo.rs` (maestro), `nucleo/drivers/video/video.rs` (vídeo), `nucleo/drivers/tempo/pit.rs` (tempo), `nucleo/drivers/tempo/rtc.rs` (relógio), `nucleo/drivers/mouse/ps2.rs` (mouse), `nucleo/cpu/idt.rs` (interrupções), `nucleo/texto.rs` (texto) e `nucleo/memoria/memoria.rs` (RAM) |
 | Binário | `nucleo/nucos` (binário plano, sem ELF) |
 | Endereço de carga | **0x20000** (o `_start` fica exatamente no primeiro byte) |
 | Arquitetura | **x86 32 bits, modo protegido** |
 | Biblioteca | nenhuma — `#![no_std]`, sem libc |
-| Compilação | `rustc --target i686-unknown-linux-gnu -C panic=abort -C target-feature=-sse,-sse2 --emit=obj` para cada `.rs` |
-| Linkagem | `ld -m elf_i386 -T nucleo/nucleo.ld --nmagic` (nucleo.o + video.o + pit.o + rtc.o + texto.o + memoria.o) + `objcopy -O binary` |
+| Compilação | `rustc --target i686-unknown-linux-gnu -C panic=abort -C opt-level=s -C target-feature=-sse,-sse2 --emit=obj` para cada `.rs` |
+| Linkagem | `ld -m elf_i386 -T nucleo/nucleo.ld --nmagic` (nucleo.o + video.o + pit.o + rtc.o + ps2.o + idt.o + texto.o + memoria.o) + `objcopy -O binary` |
 | Vídeo | **Modo 13h: 320×200, 256 cores** |
 
 O `nucleo.rs` é só o **maestro**: não desenha nem administra memória, apenas
@@ -251,6 +263,18 @@ chama os módulos na ordem certa.
   na esquerda) e **hora** (`HH:MM:SS`, encostada na direita) na segunda linha;
   redesenha **apenas os caracteres que mudaram**, apagando a célula de 8×8
   antes (sem rabiscos e sem piscar o resto da tela);
+- `ps2.rs` exporta `mouse_ps2_iniciar()`, `mouse_ps2_processar_tudo()` e
+  `mouse_ps2_ler_movimento()` — inicializa o mouse PS/2 (controlador e
+  dispositivo) e monta os pacotes de 3 bytes vindos do IRQ12; é **mudo**:
+  não escreve nada na tela (o cursor só aparecer quando você pedir);
+- `idt.rs` exporta `idt_iniciar()`, `idt_ticks()` e `idt_esperar_ms(ms)` —
+  monta a **IDT** (256 entradas) com portas de 8 bytes, preenche os vetores
+  de hardware do **PIC não remapeado** (8..15 e 0x70..0x77) com stubs que
+  enviam **EOI** e voltam com `iretd`, carrega a tabela com **LIDT** e liga
+  as interrupções com **STI**. O **IRQ0 (timer, vetor 8)** incrementa o
+  contador `TICKS` (100 Hz) e o **IRQ12 (mouse, vetor 0x74)** só manda EOI
+  nos dois PICs. `idt_esperar_ms()` conta os ticks e dorme com `hlt` até
+  o próximo IRQ0 — é assim que o laço do relógio espera sem *polling*;
 - `texto.rs` exporta `texto_escrever(texto, tamanho, x, y)` e
   `texto_escrever_numero(valor, x, y)`, guarda a fonte 8×8 (dígitos, letras e
   minúsculas do alfabeto usado) e desenha cada caractere chamando `video_pixel`;
@@ -270,9 +294,14 @@ O que o maestro faz:
 5. **inicia o relógio**: chama `rtc_iniciar()`, que faz a primeira leitura do
    RTC e desenha **data à esquerda** e **hora à direita** na segunda linha
    (`y = 14`);
-6. entra no **laço do relógio**: `pit_esperar_ms(250)` + `rtc_atualizar()`,
-   para sempre — é assim que a hora se atualiza sozinha na tela (o `hlt` e a
-   espera infinita saíram de cena).
+6. **inicializa o mouse PS/2** (`mouse_ps2_iniciar()`) — mudo, não desenha
+   nada;
+7. **inicializa a IDT** (`idt_iniciar()`): monta a tabela, carrega com `LIDT`
+   e dá `STI` — a partir daqui o **IRQ0 do timer** passa a contar os ticks;
+8. entra no **laço do relógio**: `idt_esperar_ms(250)` + `rtc_atualizar()`,
+   para sempre — a espera é **por interrupção** (dorme em `hlt` até o IRQ0
+   acordar), não mais por *polling*; é assim que a hora se atualiza sozinha
+   na tela.
 
 #### Como o `memoria.rs` gerencia a RAM
 
@@ -312,11 +341,12 @@ somado na linha do `ld`; o `nucleo.ld` continua sendo a base da linkagem.
    `objcopy` e confere a entrada `_start` com `nm`;
 3. **Compila** `nucleo/nucleo.rs` e os módulos `nucleo/drivers/video/video.rs`,
    `nucleo/drivers/tempo/pit.rs`, `nucleo/drivers/tempo/rtc.rs`,
+   `nucleo/drivers/mouse/ps2.rs`, `nucleo/cpu/idt.rs`,
    `nucleo/texto.rs` e `nucleo/memoria/memoria.rs` com `rustc` (`#![no_std]`,
-   `panic=abort`, `relocation-model=static`) em objetos separados — cada `.o`
-   fica salvo ao lado da sua fonte, igual ao `ini/inicio.o` —, linka os
-   seis com o `nucleo.ld` em `0x20000`, converte para binário plano e confere
-   o `_start` com `nm`;
+   `panic=abort`, `opt-level=s`, `relocation-model=static`) em objetos
+   separados — cada `.o` fica salvo ao lado da sua fonte, igual ao
+   `ini/inicio.o` —, linka os **oito** com o `nucleo.ld` em `0x20000`,
+   converte para binário plano e confere o `_start` com `nm`;
 4. **Cria** a `CosmOS.img` vazia com exatamente **20 MB** (`dd`);
 5. **Formata** em **ext4** com rótulo `CosmOS`, blocos de **1 KiB** e inodes de
    **256 bytes** (`mkfs.ext4 -b 1024 -I 256`);
@@ -358,7 +388,7 @@ pixels das capturas):
   instrução SSE/AVX no núcleo. O `copilar.sh` compila os módulos com
   `-C target-feature=-sse,-sse2` justamente para garantir isso (um `xorps`/
   `movaps` gerado pelo `rustc` derrubava a CPU em *triple fault*);
-- **t ≈ 1 s:** mensagem **"CosmOS Beta v0.1 Construção 0.5.2026"** centralizada,
+- **t ≈ 1 s:** mensagem **"CosmOS Beta v0.1 Construção 0.6.2026"** centralizada,
   ocupando `x = 16..300` e `y = 2..9` (primeira linha);
 - **t ≈ 4 s:** tela **limpa**, mensagem **"Entrou no Nucos"** na primeira linha
   à esquerda, ocupando `x = 0..116` e `y = 2..8` — o controle chegou ao núcleo;
@@ -371,8 +401,14 @@ pixels das capturas):
   no QEMU com dois `screendump`s: os segundos avançam sozinhos e **só os
   caracteres que mudam** são redesenhados (o restante da tela fica intacto,
   byte a byte). O horário bate com o UTC do host.
+- **interrupções (IDT):** o boot **não reinicia mais** (fica estável no QEMU
+  por tempo indeterminado) e a espera do relógio passou a ser **por IRQ0**:
+  dois `screendump`s com **4 s** de diferença mostram **348 pixeis mudando**
+  com a tela mantendo seus ~7944 pixeis desenhados — a hora avança sozinha
+  enquanto a CPU dorme em `hlt`. Conferido também com `qemu -d int,cpu_reset`:
+  nenhum *triple fault*, os vetores de hardware todos respondem com EOI.
 
-Bugs encontrados e corrigidos durante a Construção 0.5.2026:
+Bugs encontrados e corrigidos durante a Construção 0.6.2026:
 
 1. `u8 i; ... i < 256` em `carrega_inode` virava **loop infinito** (o `u8` dá a
    volta antes de chegar a 256) — corrigido para `u16`;
@@ -392,4 +428,18 @@ Bugs encontrados e corrigidos durante a Construção 0.5.2026:
    bit 2 é o **DM** (1 = binário, 0 = BCD) e o bit 1 é o **24 h/12 h** — com
    BCD interpretado como binário, `27` → 39 estourava o limite e virava `00`
    e o ano `0x26` virava `38` ("2038"). Corrigido lendo os bits certos — a
-   data passou a mostrar `27/10/2026` com a hora certa do host.
+   data passou a mostrar `27/10/2026` com a hora certa do host;
+6. o `lidt` estava com `options(nomem, nostack)` no `asm!` — **mentindo ao
+   compilador** ("essa instrução não lê memória"), que otimizava **todo o
+   preenchimento da IDT como código morto**: a CPU caía sem tabela de
+   interrupções e o sistema reiniciava em loop. Corrigido tirando o `nomem`;
+7. os stubs usavam `iret`, que esta ferramenta **monta como `iretw` (16
+   bits)** — ao voltar de uma interrupção a pilha era corrompida. Trocado
+   por **`iretd`** (32 bits);
+8. com o **PIC não remapeado**, os IRQs caem nos vetores **8..15** e
+   **0x70..0x77**; só o timer e o mouse tinham porta, então o **IRQ1 do
+   teclado** (vetor 9, que o BIOS deixa liberado) batia numa porta **vazia**
+   → **#GP → #GP em cascata → triple fault** → boot loop. Corrigido
+   preenchendo **todos** os vetores de hardware com um stub que só manda EOI
+   e retorna (o EOI é obrigatório: sem ele o PIC fica mascarado e nenhuma
+   interrupção nova chega).

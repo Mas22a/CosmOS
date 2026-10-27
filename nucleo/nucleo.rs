@@ -1,5 +1,5 @@
 /* ==========================================================================
- *   CosmOS Beta v0.1 — Construção 0.5.2026
+ *   CosmOS Beta v0.1 — Construção 0.6.2026
  *   nucleo/nucleo.rs — Núcleo do CosmOS (Nucos) — o maestro
  * --------------------------------------------------------------------------
  *   Alvo   : x86 32 bits, modo protegido. O inicio procura /nucleo/nucos
@@ -43,6 +43,13 @@ extern "C" {
     fn pit_esperar_ms(ms: u32);
     fn rtc_iniciar();
     fn rtc_atualizar();
+    /* Mouse PS/2 (nucleo/drivers/mouse/ps2.rs) — MUDO, não desenha. */
+    fn mouse_ps2_iniciar() -> u8;
+    fn mouse_ps2_processar_tudo() -> u32;
+    fn mouse_ps2_ler_movimento(dx: *mut i16, dy: *mut i16) -> u8;
+    /* IDT (nucleo/cpu/idt.rs) */
+    fn idt_iniciar();
+    fn idt_esperar_ms(ms: u32);
 }
 
 const COR_PRETO: u8 = 0;
@@ -73,6 +80,8 @@ pub extern "C" fn _start() -> ! {
     iniciar_tempo();
     escrever_boas_vindas(ram);
     iniciar_relogio();
+    iniciar_mouse();
+    iniciar_idt();
 
     laço_do_relogio();
 }
@@ -126,13 +135,24 @@ fn iniciar_relogio() {
     unsafe { rtc_iniciar() };
 }
 
-/* Laço do relógio: espera um pouco no PIT (por polling, a CPU está com
- * cli) e relê o RTC. O rtc_atualizar() só redesenha o que mudou, então a
- * hora vira sozinha sem piscar a tela e sem nunca mais sair daqui. */
+/* Inicializa o mouse PS/2 (sem desenhar nada). */
+fn iniciar_mouse() {
+    unsafe { mouse_ps2_iniciar() };
+}
+
+/* Inicializa IDT + habilita interrupções (STI). */
+fn iniciar_idt() {
+    unsafe { idt_iniciar() };
+}
+
+/* Laço do relógio: espera pelo timer (via IDT/interrupção) e relê o RTC.
+ * O rtc_atualizar() só redesenha o que mudou, então a
+ * hora vira sozinha sem piscar a tela e sem nunca mais sair daqui.
+ * O mouse agora é processado por IRQ12 (isr_mouse_handler), não mais aqui. */
 fn laço_do_relogio() -> ! {
     loop {
         unsafe {
-            pit_esperar_ms(INTERVALO_RELOGIO_MS);
+            idt_esperar_ms(INTERVALO_RELOGIO_MS);
             rtc_atualizar();
         }
     }
