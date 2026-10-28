@@ -1,13 +1,16 @@
-# CosmOS Beta v0.1 — Construção 0.7.2026
+# CosmOS Beta v0.1 — Construção 0.8.2026
 
 Sistema operacional construído do zero, começando pelo zero absoluto: o **primeiro
-estágio de boot** (Assembly/NASM), o **segundo estágio** (C freestanding) e o
-**núcleo** (Rust `no_std`), testados no emulador QEMU.
+estágio de boot** (Assembly/NASM), o **segundo estágio** (C freestanding), o
+**núcleo** (Rust `no_std`) e a **interface gráfica** escrita em **Java bare-metal**
+e compilada para **binário x86-32 puro** por um compilador próprio em Python —
+tudo testado no emulador QEMU.
 
 > **Regra do projeto:** nenhum arquivo ou pasta é criado ou alterado sem permissão
 > do desenvolvedor. Os únicos artefatos gerados automaticamente são os produtos do
 > próprio `copilar.sh` (`ini/inimin`, os `.o` (`ini/inicio.o`, `servicos/servicos.o`
-> e os dez do núcleo), `ini/inicio`, `servicos/usr`, `nucleo/nucos` e `CosmOS.img`).
+> e os dez do núcleo), `ini/inicio`, `servicos/usr`, `nucleo/nucos`,
+> `interface/grain` e `CosmOS.img`).
 
 ---
 
@@ -41,7 +44,10 @@ Desenvolvimento/
 │           └── video.rs # Driver de vídeo (modo 13h) — FONTE
 │   └── nucleo.ld       # Linker script: _start é o primeiro byte em 0x20000
 ├── servicos/
-│   └── servicos.cpp    # Serviço "usr" — sai do kernel, tela preta — FONTE
+│   └── servicos.cpp    # Serviço "usr" — carrega e salta para a interface — FONTE
+├── interface/
+│   ├── papel_de_parede.java  # Interface "grain" (Java bare-metal) — FONTE
+│   └── compilador.py         # Compilador Java → binário x86-32 — FONTE
 ├── copilar.sh          # Compila os estágios e gera a CosmOS.img
 └── README.md           # Este arquivo
 ```
@@ -54,6 +60,7 @@ Gerados pelo `copilar.sh` (não versionados à mão):
 ├── ini/inicio                    # Binário plano do inicio.c (carregado em 0x10000)
 ├── servicos/servicos.o           # Objeto ELF gerado a partir de servicos.cpp
 ├── servicos/usr                  # Binário plano do servicos.cpp (carregado em 0x60000)
+├── interface/grain               # Binário x86-32 puro da interface (carregado em 0x80000)
 ├── nucleo/nucleo.o               # Objeto ELF do nucleo.rs (maestro)
 ├── nucleo/texto.o                # Objeto ELF do texto.rs
 ├── nucleo/memoria/memoria.o      # Objeto ELF do memoria.rs
@@ -75,7 +82,7 @@ Gerados pelo `copilar.sh` (não versionados à mão):
 Em Debian/Ubuntu (testado no Debian 13 “trixie”):
 
 ```bash
-sudo apt update && sudo apt install -y nasm gcc binutils qemu-system-x86 e2fsprogs
+sudo apt update && sudo apt install -y nasm gcc binutils qemu-system-x86 e2fsprogs python3
 
 # Rust (rustup) + alvo de 32 bits usado pelo núcleo
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
@@ -89,6 +96,7 @@ rustup target add i686-unknown-linux-gnu
 | `gcc` | `gcc` | Compilar o `ini/inicio.c` em modo freestanding (`-m32`) |
 | `ld`, `objcopy`, `nm` | `binutils` | Linkar os binários planos e conferir os endereços |
 | `rustc`, `rustup` | [rustup.rs](https://rustup.rs) | Compilar `nucleo/nucleo.rs` e os drivers (`#![no_std]`) |
+| `python3` | `python3` | Rodar o `interface/compilador.py` (Java → binário x86-32) |
 | `qemu-system-x86_64` | `qemu-system-x86` | Executar a `CosmOS.img` |
 | `mkfs.ext4` / `debugfs` / `e2fsck` | `e2fsprogs` | Criar, popular e verificar a imagem ext4 (sem root) |
 
@@ -97,14 +105,6 @@ rustup target add i686-unknown-linux-gnu
 > `#![no_std]` (nunca toca libc) e o `copilar.sh` linka manualmente com
 > `ld -m elf_i386` usando `relocation-model=static`, o “linux” do nome não muda
 > nada: só o `core` é usado.
-
-No Arch Linux:
-
-```bash
-sudo pacman -S nasm gcc binutils qemu-system-x86 e2fsprogs
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-rustup target add i686-unknown-linux-gnu
-```
 
 ---
 
@@ -129,7 +129,7 @@ qemu-system-x86_64 -drive format=raw,file=CosmOS.img,if=ide -boot order=c -m 128
 **totalmente preto** e, na **primeira linha, centralizada**, a mensagem:
 
 ```
-CosmOS Beta v0.1 Construção 0.7.2026
+CosmOS Beta v0.1 Construção 0.8.2026
 ```
 
 **2 segundos depois**, o segundo estágio passa o controle para o núcleo, que
@@ -146,9 +146,15 @@ RAM DE 134217728 BYTES         ← 3ª linha (y = 26)
 **5 segundos depois de entrar no núcleo**, o kernel **SAI**: ele procura
 `/servicos/usr` no ext4 da imagem (ATA PIO + `ext4.rs`), carrega em `0x60000`,
 desliga as interrupções e salta para ele. O `servicos/servicos.cpp` limpa a
-tela e o resultado é uma **tela totalmente preta** — sinal de que o serviço
-assumiu. No futuro o usr voltará a chamar o núcleo, que será a **ponte**
-permanente entre o kernel e a interface gráfica.
+tela, **prepara a área do grain** (zera `0x80000..0x88000`), procura
+`/interface/grain` no ext4, carrega em `0x80000`, ajusta a pilha para `0x90000`
+e salta. O `grain` — **65 bytes de código x86-32 puro**, gerado pelo compilador
+Java em Python — pinta a tela inteira de **azul-céu claro** (índice 78 da
+paleta: `127,191,255`) e dorme em `hlt`.
+
+**Resultado final:** a tela fica inteira no tom **`#7FBFFF`** — a interface
+gráfica assumiu o controle. A cadeia completa é
+`inimin → inicio → nucos → usr → /interface/grain`.
 
 Enquanto o núcleo está na tela, a **2ª linha é viva**: ele espera os 5 s
 **dormindo com `hlt`** até a **interrupção do timer (IRQ0)** acordá-lo a cada
@@ -182,8 +188,12 @@ BIOS
                                                       └─> espera 5 s (idt_esperar_ms — hlt até o IRQ0 do
                                                           timer) e relê o RTC — a hora corre sozinha
                                                           └─> ata.rs + ext4.rs: acha /servicos/usr no ext4
-                                                              └─> 0x60000 usr (servicos): CLI + limpa a
-                                                                  tela → PRETA (o serviço assumiu)
+                                                              └─> 0x60000 usr (servicos): limpa a tela,
+                                                                  prepara 0x80000..0x88000, acha
+                                                                  /interface/grain no ext4
+                                                                  └─> 0x80000 grain: pinta a tela
+                                                                      de azul-céu claro (127,191,255)
+                                                                      e dorme em hlt
 ```
 
 ### Mapa de memória (modo protegido)
@@ -194,7 +204,9 @@ BIOS
 | `0x10000` | `ini/inicio` (2º estágio, até 61440 bytes) |
 | `0x20000` | `nucleo/nucos` (núcleo, até 256 KiB) |
 | `0x60000` | `servicos/usr` (serviço usr, até 128 KiB — o núcleo salta para cá) |
-| `0x90000` | Topo da pilha (definida pelo `inimin`; o `inicio` a zera antes do salto) |
+| `0x80000` | `interface/grain` (interface gráfica, até 32 KiB — o usr salta para cá) |
+| `0x88000` | Fim da área reservada ao grain |
+| `0x90000` | Topo da pilha (definida pelo `inimin`; o usr a reajusta antes de saltar para o grain) |
 | `0xA0000` | Memória de vídeo do modo 13h (320×200×8) |
 | `0x100000` | Início do heap gerenciado pelo `memoria.rs` (1 MiB) |
 
@@ -387,17 +399,40 @@ Este é o **primeiro serviço do sistema** e a **saída do kernel**:
    `0x90000`;
 2. o `_start` do usr **limpa a tela inteira** em preto (`0xA0000`), no mesmo
    modo 13h que o boot deixou ligado;
-3. ele **dorme em `hlt` para sempre** — o usuário vê uma **tela preta**,
-   sinal de que o kernel saiu e o serviço assumiu.
-
-**Papel futuro:** o usr voltará a **chamar o núcleo** (pedindo desenho,
-arquivos, entrada, etc.) e o núcleo será a **ponte permanente** entre o
-kernel e a interface gráfica — a IDT, os drivers e o heap continuam na
-memória, prontos para serem reutilizados.
+3. **prepara o terreno**: zera `0x80000..0x88000` (32 KiB reservados ao grain);
+4. lê **`/interface/grain`** do ext4 (ATA PIO + `ext4.rs`) e carrega em
+   `0x80000`;
+5. ajusta a pilha para `0x90000` e **salta para o grain** — a interface
+   gráfica assume o controle.
 
 O `copilar.sh` linka o usr em `0x60000` (`ld -Ttext=0x60000 -e _start`) e
 confere com `nm` que o `_start` está em `0x00060000`, do mesmo jeito que faz
 com o `inicio` (0x10000) e o `nucos` (0x20000).
+
+### Fase 5 — `interface/papel_de_parede.java` (a interface "grain")
+
+| Item | Valor |
+|---|---|
+| Fonte | `interface/papel_de_parede.java` (Java **bare-metal**, dialeto CosmOS) |
+| Compilador | `interface/compilador.py` (Python — gera código de máquina direto) |
+| Binário | `interface/grain` (binário plano x86-32, sem ELF, **sem C e sem VM**) |
+| Endereço de carga | **0x80000** (o usr salta para cá) |
+| Arquitetura | **x86 32 bits, modo protegido** |
+| Vídeo | **Modo 13h: 320×200, 256 cores** |
+
+O `compilador.py` é um compilador de um subconjunto de Java que **emite os
+bytes x86-32 diretamente** (lexer + parser + codificador de instruções), sem
+passar por C, sem `gcc` e sem máquina virtual. Ele suporta variáveis, laços,
+condicionais, comparações, chamadas e dois intrínsecos:
+
+| Intrínseco | Vira | Efeito |
+|---|---|---|
+| `memoria_preencher(destino, tamanho, valor)` | `REP STOSB` | preenche memória |
+| `cpu_halt()` | `HLT` | dorme a CPU |
+
+O programa atual preenche os **64000 bytes** da memória de vídeo (`0xA0000`)
+com o índice **78** da paleta (`127,191,255`, azul-céu claro) e entra em
+`hlt` para sempre. O `grain` resultante tem apenas **65 bytes**.
 
 ---
 
@@ -411,6 +446,10 @@ com o `inicio` (0x10000) e o `nucos` (0x20000).
 3. **Compila** `servicos/servicos.cpp` com `g++ -m32` freestanding em
    `servicos/servicos.o`, linka em `0x60000` (`ld -e _start`), converte para
    binário plano (`servicos/usr`) e confere a entrada `_start` com `nm`;
+3b. **Compila** `interface/papel_de_parede.java` com o `interface/compilador.py`
+    (Python), que gera **diretamente** o binário x86-32 `interface/grain`
+    (sem C, sem `gcc`, sem VM) e confere que ele começa com `CALL` (`0xE8`) e
+    cabe em 32 KiB;
 4. **Compila** `nucleo/nucleo.rs` e os módulos `nucleo/drivers/video/video.rs`,
    `nucleo/drivers/tempo/pit.rs`, `nucleo/drivers/tempo/rtc.rs`,
    `nucleo/drivers/mouse/ps2.rs`, `nucleo/drivers/disco/ata.rs`,
@@ -424,12 +463,13 @@ com o `inicio` (0x10000) e o `nucos` (0x20000).
 6. **Formata** em **ext4** com rótulo `CosmOS`, blocos de **1 KiB** e inodes de
    **256 bytes** (`mkfs.ext4 -b 1024 -I 256`);
 7. **Popula a imagem sem precisar de root**, usando `debugfs`:
-   - cria somente as pastas `inicio/`, `nucleo/` e `servicos/`;
+   - cria as pastas `inicio/`, `nucleo/`, `servicos/` e `interface/`;
    - copia `inimin` e `inicio` para `inicio/`;
    - copia `nucos` para `nucleo/`;
    - copia `usr` para `servicos/`;
+   - copia `grain` para `interface/`;
    - apaga o `lost+found` que o ext4 cria sozinho;
-   - confere se os **quatro** arquivos estão lá;
+   - confere se os **cinco** arquivos estão lá;
 8. **Grava os 2 setores de boot** (`ini/inimin`) no início da imagem com
    `dd conv=notrunc` — é o bloco de boot reservado do ext4;
 9. **Verifica** a imagem com `e2fsck -f -n`.
@@ -444,6 +484,7 @@ Raiz (ext4)    : /inicio/inimin   (1º estágio)
                  /inicio/inicio   (2º estágio)
                  /nucleo/nucos    (núcleo em Rust)
                  /servicos/usr    (serviço usr — a saída do kernel)
+                 /interface/grain (interface gráfica — binário x86-32 puro)
 ```
 
 ---
@@ -458,13 +499,16 @@ pixels das capturas):
 - `servicos/usr` com entrada `_start` em **0x60000**;
 - `nucleo/nucos` com entrada `_start` em **0x20000** (primeiro byte do arquivo);
 - `CosmOS.img` com **20971520 bytes** (20 MB) e `e2fsck` sem erros;
-- raiz da imagem contendo **apenas** `/inicio`, `/nucleo` e `/servicos`, com
-  `inimin`, `inicio`, `nucos` e `usr` como arquivos separados;
+- raiz da imagem contendo **apenas** `/inicio`, `/nucleo`, `/servicos` e
+  `/interface`, com `inimin`, `inicio`, `nucos`, `usr` e `grain` como arquivos
+  separados (nenhum `.py`, `.java`, `.c` ou `.o` vai para a imagem);
+- `interface/grain` com **65 bytes** de código x86-32, começando em `0x80000`
+  com a instrução `CALL` (`0xE8`) para `main` — conferido com `objdump`;
 - boot real no QEMU: CPU em **modo protegido** (`CPL=0`), sem nenhuma
   instrução SSE/AVX no núcleo. O `copilar.sh` compila os módulos com
   `-C target-feature=-sse,-sse2` justamente para garantir isso (um `xorps`/
   `movaps` gerado pelo `rustc` derrubava a CPU em *triple fault*);
-- **t ≈ 1 s:** mensagem **"CosmOS Beta v0.1 Construção 0.7.2026"** centralizada,
+- **t ≈ 1 s:** mensagem **"CosmOS Beta v0.1 Construção 0.8.2026"** centralizada,
   ocupando `x = 16..300` e `y = 2..9` (primeira linha);
 - **t ≈ 4 s:** tela **limpa**, mensagem **"Entrou no Nucos"** na primeira linha
   à esquerda, ocupando `x = 0..116` e `y = 2..8` — o controle chegou ao núcleo;
@@ -483,15 +527,23 @@ pixels das capturas):
   com a tela mantendo seus ~7944 pixeis desenhados — a hora avança sozinha
   enquanto a CPU dorme em `hlt`. Conferido também com `qemu -d int,cpu_reset`:
   nenhum *triple fault*, os vetores de hardware todos respondem com EOI.
-- **saída do kernel (tela preta):** dois `screendump`s do mesmo boot:
-  **t ≈ 4 s** mostra as **três linhas do núcleo** (2692 pixéis acesos em
-  `y = 4..65` da captura 640×400 — boas-vindas, data/hora e RAM) e
-  **t ≈ 11 s** mostra **0 pixéis não pretos** — **tela 100% preta**. Os 5 s
-  passaram, o `/servicos/usr` foi achado no ext4, carregado em `0x60000` e
-  assumiu a CPU (se o arquivo não fosse achado, as três linhas continuariam
-  na tela no laço de segurança).
+- **saída do kernel e interface:**
+  - **t ≈ 4 s:** as **três linhas do núcleo** (2692 pixéis acesos em
+    `y = 4..65` da captura 640×400 — boas-vindas, data/hora e RAM);
+  - **t ≈ 11 s:** a tela inteira fica **uniforme** em **`#7FBFFF`**
+    (`127,191,255` — índice **78** da paleta do modo 13h), sem nenhum pixel
+    de outra cor. Os 5 s passaram, o `/servicos/usr` foi achado no ext4,
+    carregado em `0x60000`, preparou `0x80000..0x88000`, carregou
+    `/interface/grain` em `0x80000` e saltou; os **65 bytes** de código
+    x86-32 do grain pintaram os **64000 bytes** da memória de vídeo e
+    entraram em `hlt`. A cadeia completa é
+    `inimin → inicio → nucos → usr → /interface/grain`;
+  - trocando só o `interface/papel_de_parede.java` de `COR_AZUL_CLARO = 9`
+    para **`78`** e recompilando, a captura passou de `(87,87,255)` (azulado
+    arroxeado) para o azul-céu claro `(127,191,255)` — confirmado por
+    amostragem de todos os pixels do `screendump`.
 
-Bugs encontrados e corrigidos durante a Construção 0.7.2026:
+Bugs encontrados e corrigidos durante a Construção 0.8.2026:
 
 1. `u8 i; ... i < 256` em `carrega_inode` virava **loop infinito** (o `u8` dá a
    volta antes de chegar a 256) — corrigido para `u16`;
@@ -526,3 +578,18 @@ Bugs encontrados e corrigidos durante a Construção 0.7.2026:
    preenchendo **todos** os vetores de hardware com um stub que só manda EOI
    e retorna (o EOI é obrigatório: sem ele o PIC fica mascarado e nenhuma
    interrupção nova chega).
+
+9. o `preparar_terreno()` do `servicos.cpp` ajustava `esp` para `0x90000` e
+   **depois fazia `ret`** — o `ret` lia o endereço de retorno da pilha nova
+   (zerada em `0x80000`) e saltava para `0x00000000`, derrubando o sistema
+   com **tela preta**. A troca de pilha só pode acontecer na função que
+   **não retorna** (`saltar_grain`); corrigido removendo o `esp` do
+   `preparar_terreno`;
+10. a área reservada ao grain era de **128 KiB** (`0x80000..0xA0000`), mas a
+    pilha fica em `0x90000` e cresce para baixo — o grain e a pilha se
+    sobrepunham. Reduzida para **32 KiB** (`0x80000..0x88000`), com 32 KiB de
+    folga antes da pilha; o `copilar.sh` recusa um `grain` maior que isso;
+11. o `grain` aparecia com tom **arroxeado** (`(87,87,255)`) porque o índice
+    **9** da paleta do modo 13h tem R = G. Trocado só no `.java` para o índice
+    **78** (`(127,191,255)`, azul-céu claro), escolhido depois de varrer a
+    paleta real do QEMU pintando uma faixa por índice.

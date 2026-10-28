@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ==========================================================================
-#   CosmOS Beta v0.1 — Construção 0.7.2026
+#   CosmOS Beta v0.1 — Construção 0.8.2026
 #   copilar.sh — compila os estágios de boot e gera a imagem CosmOS.img
 # --------------------------------------------------------------------------
 #   O que este script faz:
@@ -10,6 +10,9 @@
 #     3) Compila servicos/servicos.cpp → servicos/servicos.o
 #                                →  servicos/usr (binário plano em 0x60000,
 #                                o serviço que assume depois do kernel)
+#     3b) Compila interface/papel_de_parede.java (Java bare-metal) via
+#        interface/compilador.py → grain (binário plano x86-32 em 0x80000,
+#        a interface gráfica — sem C, sem VM)
 #     4) Compila nucleo/drivers/video/video.rs (driver de vídeo),
 #        nucleo/drivers/tempo/pit.rs (driver de tempo — PIT),
 #        nucleo/drivers/tempo/rtc.rs (relógio — data/hora na tela),
@@ -23,15 +26,16 @@
 #        plano em 0x20000)
 #     5) Cria a imagem vazia CosmOS.img com 20 MB
 #     6) Formata a imagem em ext4 (blocos de 1 KiB, inodes de 256 bytes)
-#     7) Cria somente as pastas inicio/, nucleo/ e servicos/ dentro da
-#        imagem e coloca o inimin, o inicio, o nucos e o usr nelas (sem
-#        precisar de root, via debugfs) e apaga o lost+found que o ext4
-#        cria sozinho
+#     7) Cria as pastas inicio/, nucleo/, servicos/ e interface/ dentro da
+#        imagem e coloca o inimin, o inicio, o nucos, o usr e o grain nelas
+#        (sem precisar de root, via debugfs) e apaga o lost+found que o
+#        ext4 cria sozinho
 #     8) Escreve os 2 primeiros setores (bloco de boot ext4) no início
 #        da imagem: o setor 0 carrega o setor 1, que localiza
 #        /inicio/inicio no ext4 e passa o controle para ele — ele acha
 #        /nucleo/nucos, espera 2 s e salta para o núcleo; o núcleo
-#        espera 5 s, acha /servicos/usr no ext4 e salta para ele
+#        espera 5 s, acha /servicos/usr no ext4 e salta para ele; o usr
+#        acha /interface/grain e salta para a interface gráfica
 #     9) Conferir o sistema de arquivos
 #
 #   Uso: ./copilar.sh
@@ -176,6 +180,48 @@ if [ "$TAM_U" -le 0 ] || [ "$TAM_U" -gt "$USR_MAX" ]; then
     exit 1
 fi
 
+# --- 3b) Compilar a interface grain (Java bare-metal → BINÁRIO x86-32) ----
+# interface/papel_de_parede.java é escrito no dialeto "Java bare-metal" do
+# CosmOS. O compilador Python (interface/compilador.py) gera DIRETAMENTE o
+# código de máquina x86-32 (sem C, sem gcc, sem assembler externo, sem VM).
+# O grain é instalado em /interface/grain e o usr o carrega em 0x80000.
+echo "[CosmOS] 3b/9 Compilando interface/papel_de_parede.java → grain ..."
+FONTE_GRAIN="$RAIZ/interface/papel_de_parede.java"
+COMPILADOR="$RAIZ/interface/compilador.py"
+GRAIN="$RAIZ/interface/grain"
+GRAIN_MEM=0x80000
+GRAIN_MAX=32768          # 32 KiB (0x8000): 0x80000..0x88000, antes da pilha (0x90000)
+GRAIN_EXISTE=0
+
+if ! command -v python3 > /dev/null 2>&1; then
+    echo "[CosmOS] ERRO: python3 não encontrado (necessário para o compilador Java)." >&2
+    exit 1
+fi
+
+python3 "$COMPILADOR" "$FONTE_GRAIN" "$GRAIN"
+
+if [ ! -f "$GRAIN" ]; then
+    echo "[CosmOS] ERRO: o compilador não gerou interface/grain." >&2
+    exit 1
+fi
+
+# O compilador emite _start como primeiro byte do binário (0x80000); a
+# primeira instrução gerada é CALL (0xE8) para a função main.
+PRIMEIRO="$(od -An -tx1 -N1 "$GRAIN" | tr -d ' \n')"
+if [ "$PRIMEIRO" != "e8" ]; then
+    echo "[CosmOS] ERRO: interface/grain não começa com CALL (0xE8) — 0x$PRIMEIRO." >&2
+    exit 1
+fi
+
+TAM_G="$(wc -c < "$GRAIN")"
+if [ "$TAM_G" -le 0 ] || [ "$TAM_G" -gt "$GRAIN_MAX" ]; then
+    echo "[CosmOS] ERRO: interface/grain tem $TAM_G bytes (esperado entre 1 e $GRAIN_MAX)." >&2
+    exit 1
+fi
+
+GRAIN_EXISTE=1
+echo "[CosmOS]   grain gerado: $TAM_G bytes de código x86-32 puro"
+
 # --- 4) Compilar o núcleo (Rust no_std, binário plano) --------------------
 # Cada .o fica salvo ao lado da sua fonte (nucleo/video.o, nucleo/pit.o...),
 # igual ao ini/inicio.o — só o .elf intermediário vai para $TMP.
@@ -249,12 +295,22 @@ dd if=/dev/zero of="$IMG" bs=1M count="$TAMANHO_MB" status=none
 echo "[CosmOS] 6/9 Formatando em ext4 (blocos de 1 KiB, inodes de 256 bytes) ..."
 mkfs.ext4 -F -q -L CosmOS -b 1024 -I 256 "$IMG"
 
-# --- 7) Só as pastas inicio/, nucleo/ e servicos/ com os binários dentro --
-echo "[CosmOS] 7/9 Criando inicio/, nucleo/ e servicos/ com os binários dentro da imagem ..."
-printf 'mkdir inicio\nmkdir nucleo\nmkdir servicos\ncd inicio\nwrite %s inimin\nwrite %s inicio\ncd ../nucleo\nwrite %s nucos\ncd ../servicos\nwrite %s usr\ncd /\nrmdir lost+found\nquit\n' \
-    "$BIN" "$BIN_C" "$NUCOS" "$USR" | debugfs -w "$IMG" > /dev/null
+# --- 7) Pastas inicio/, nucleo/, servicos/ e interface/ com binários -------
+echo "[CosmOS] 7/9 Criando inicio/, nucleo/, servicos/ e interface/ com os binários dentro da imagem ..."
+if [ "$GRAIN_EXISTE" -eq 1 ]; then
+    printf 'mkdir inicio\nmkdir nucleo\nmkdir servicos\nmkdir interface\ncd inicio\nwrite %s inimin\nwrite %s inicio\ncd ../nucleo\nwrite %s nucos\ncd ../servicos\nwrite %s usr\ncd ../interface\nwrite %s grain\ncd /\nrmdir lost+found\nquit\n' \
+        "$BIN" "$BIN_C" "$NUCOS" "$USR" "$GRAIN" | debugfs -w "$IMG" > /dev/null
+else
+    printf 'mkdir inicio\nmkdir nucleo\nmkdir servicos\ncd inicio\nwrite %s inimin\nwrite %s inicio\ncd ../nucleo\nwrite %s nucos\ncd ../servicos\nwrite %s usr\ncd /\nrmdir lost+found\nquit\n' \
+        "$BIN" "$BIN_C" "$NUCOS" "$USR" | debugfs -w "$IMG" > /dev/null
+fi
 
-for ARQ in inicio/inimin inicio/inicio nucleo/nucos servicos/usr; do
+ARQUIVOS_ESPERADOS="inicio/inimin inicio/inicio nucleo/nucos servicos/usr"
+if [ "$GRAIN_EXISTE" -eq 1 ]; then
+    ARQUIVOS_ESPERADOS="$ARQUIVOS_ESPERADOS interface/grain"
+fi
+
+for ARQ in $ARQUIVOS_ESPERADOS; do
     if ! debugfs -R "stat /$ARQ" "$IMG" 2> /dev/null | grep -q 'Inode:'; then
         echo "[CosmOS] ERRO: não foi possível gravar /$ARQ dentro da imagem." >&2
         exit 1
@@ -265,6 +321,13 @@ done
 echo "[CosmOS] 8/9 Gravando o primeiro estágio no bloco de boot (2 setores) ..."
 dd if="$BIN" of="$IMG" bs=512 count=2 conv=notrunc status=none
 
+# Tamanho do grain (se foi compilado)
+if [ "$GRAIN_EXISTE" -eq 1 ]; then
+    TAM_GRAIN="$(wc -c < "$GRAIN")"
+else
+    TAM_GRAIN=0
+fi
+
 # --- 9) Conferir o sistema de arquivos -----------------------------------
 echo "[CosmOS] 9/9 Verificando a imagem ..."
 e2fsck -f -n "$IMG" > /dev/null
@@ -273,4 +336,5 @@ echo "[CosmOS] Pronto! Imagem gerada: CosmOS.img (${TAMANHO_MB} MB, ext4)"
 echo "[CosmOS] Conteúdo: /inicio/inimin (1º estágio)  |  /inicio/inicio (2º estágio, ${TAM_C} bytes)"
 echo "[CosmOS]           /nucleo/nucos (núcleo em Rust, ${TAM_N} bytes, carregado em 0x20000)"
 echo "[CosmOS]           /servicos/usr (serviço usr, ${TAM_U} bytes, carregado em $USR_MEM)"
-echo "[CosmOS] Setor de boot: 2 setores (1024 bytes) — setor 0 → setor 1 → /inicio/inicio → /nucleo/nucos → /servicos/usr"
+echo "[CosmOS]           /interface/grain (interface gráfica, ${TAM_GRAIN} bytes, carregado em 0x80000)"
+echo "[CosmOS] Setor de boot: 2 setores (1024 bytes) — setor 0 → setor 1 → /inicio/inicio → /nucleo/nucos → /servicos/usr → /interface/grain"

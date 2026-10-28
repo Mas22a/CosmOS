@@ -1,5 +1,5 @@
 /* ==========================================================================
- *   CosmOS Beta v0.1 — Construção 0.7.2026
+ *   CosmOS Beta v0.1 — Construção 0.8.2026
  *   nucleo/drivers/mouse/ps2.rs — Driver do mouse PS/2
  * --------------------------------------------------------------------------
  *   Alvo   : x86 32 bits, modo protegido.
