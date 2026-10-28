@@ -1,4 +1,4 @@
-# CosmOS Beta v0.1 — Construção 0.6.2026
+# CosmOS Beta v0.1 — Construção 0.7.2026
 
 Sistema operacional construído do zero, começando pelo zero absoluto: o **primeiro
 estágio de boot** (Assembly/NASM), o **segundo estágio** (C freestanding) e o
@@ -6,8 +6,8 @@ estágio de boot** (Assembly/NASM), o **segundo estágio** (C freestanding) e o
 
 > **Regra do projeto:** nenhum arquivo ou pasta é criado ou alterado sem permissão
 > do desenvolvedor. Os únicos artefatos gerados automaticamente são os produtos do
-> próprio `copilar.sh` (`ini/inimin`, os `.o` (`ini/inicio.o` e os oito do núcleo),
-> `ini/inicio`, `nucleo/nucos` e `CosmOS.img`).
+> próprio `copilar.sh` (`ini/inimin`, os `.o` (`ini/inicio.o`, `servicos/servicos.o`
+> e os dez do núcleo), `ini/inicio`, `servicos/usr`, `nucleo/nucos` e `CosmOS.img`).
 
 ---
 
@@ -25,18 +25,24 @@ Desenvolvimento/
 │   ├── texto.rs        # Driver de texto (fonte 8x8) — FONTE
 │   ├── cpu/
 │   │   └── idt.rs      # IDT — interrupções de hardware (timer IRQ0) — FONTE
+│   ├── arquivos/
+│   │   └── ext4.rs     # Sistema de arquivos (ext4) — acha /servicos/usr — FONTE
 │   ├── memoria/
 │   │   └── memoria.rs  # Gerenciador de memória RAM (heap) — FONTE
-│   ├── drivers/
-│   │   ├── tempo/
-│   │   │   ├── pit.rs   # Driver de tempo (PIT canal 0) — mudo — FONTE
-│   │   │   └── rtc.rs   # Relógio de tempo real (RTC) — data/hora na tela — FONTE
-│   │   ├── mouse/
-│   │   │   └── ps2.rs   # Driver de mouse PS/2 — MUDO (não desenha) — FONTE
-│   │   └── video/
-│   │       └── video.rs # Driver de vídeo (modo 13h) — FONTE
+│   └── drivers/
+│       ├── tempo/
+│       │   ├── pit.rs   # Driver de tempo (PIT canal 0) — mudo — FONTE
+│       │   └── rtc.rs   # Relógio de tempo real (RTC) — data/hora na tela — FONTE
+│       ├── mouse/
+│       │   └── ps2.rs   # Driver de mouse PS/2 — MUDO (não desenha) — FONTE
+│       ├── disco/
+│       │   └── ata.rs   # Driver de disco ATA PIO (leitura de setores) — FONTE
+│       └── video/
+│           └── video.rs # Driver de vídeo (modo 13h) — FONTE
 │   └── nucleo.ld       # Linker script: _start é o primeiro byte em 0x20000
-├── copilar.sh          # Compila os três estágios e gera a CosmOS.img
+├── servicos/
+│   └── servicos.cpp    # Serviço "usr" — sai do kernel, tela preta — FONTE
+├── copilar.sh          # Compila os estágios e gera a CosmOS.img
 └── README.md           # Este arquivo
 ```
 
@@ -46,6 +52,8 @@ Gerados pelo `copilar.sh` (não versionados à mão):
 ├── ini/inimin                    # Binário do inimin.asm (1024 bytes = 2 setores)
 ├── ini/inicio.o                  # Objeto ELF gerado a partir de inicio.c
 ├── ini/inicio                    # Binário plano do inicio.c (carregado em 0x10000)
+├── servicos/servicos.o           # Objeto ELF gerado a partir de servicos.cpp
+├── servicos/usr                  # Binário plano do servicos.cpp (carregado em 0x60000)
 ├── nucleo/nucleo.o               # Objeto ELF do nucleo.rs (maestro)
 ├── nucleo/texto.o                # Objeto ELF do texto.rs
 ├── nucleo/memoria/memoria.o      # Objeto ELF do memoria.rs
@@ -53,8 +61,10 @@ Gerados pelo `copilar.sh` (não versionados à mão):
 ├── nucleo/drivers/tempo/pit.o    # Objeto ELF do pit.rs
 ├── nucleo/drivers/tempo/rtc.o    # Objeto ELF do rtc.rs
 ├── nucleo/drivers/mouse/ps2.o    # Objeto ELF do ps2.rs
+├── nucleo/drivers/disco/ata.o    # Objeto ELF do ata.rs
+├── nucleo/arquivos/ext4.o        # Objeto ELF do ext4.rs
 ├── nucleo/cpu/idt.o              # Objeto ELF do idt.rs
-├── nucleo/nucos                  # Binário plano dos oito .o linkados (0x20000)
+├── nucleo/nucos                  # Binário plano dos dez .o linkados (0x20000)
 └── CosmOS.img                    # Imagem de 20 MB, ext4, pronta para bootar no QEMU
 ```
 
@@ -119,7 +129,7 @@ qemu-system-x86_64 -drive format=raw,file=CosmOS.img,if=ide -boot order=c -m 128
 **totalmente preto** e, na **primeira linha, centralizada**, a mensagem:
 
 ```
-CosmOS Beta v0.1 Construção 0.6.2026
+CosmOS Beta v0.1 Construção 0.7.2026
 ```
 
 **2 segundos depois**, o segundo estágio passa o controle para o núcleo, que
@@ -133,10 +143,17 @@ Entrou no Nucos                ← 1ª linha (y =  2)
 RAM DE 134217728 BYTES         ← 3ª linha (y = 26)
 ```
 
-A **2ª linha é viva**: o núcleo fica em laço, **dormindo com `hlt`** até a
-**interrupção do timer (IRQ0)** acordá-lo a cada 250 ms (`idt_esperar_ms`) e
-relendo o RTC. Só os caracteres que mudaram são redesenhados — o resto da tela
-não pisca. A CPU não fica em *polling*: ela descansa até o IRQ0 chegar.
+**5 segundos depois de entrar no núcleo**, o kernel **SAI**: ele procura
+`/servicos/usr` no ext4 da imagem (ATA PIO + `ext4.rs`), carrega em `0x60000`,
+desliga as interrupções e salta para ele. O `servicos/servicos.cpp` limpa a
+tela e o resultado é uma **tela totalmente preta** — sinal de que o serviço
+assumiu. No futuro o usr voltará a chamar o núcleo, que será a **ponte**
+permanente entre o kernel e a interface gráfica.
+
+Enquanto o núcleo está na tela, a **2ª linha é viva**: ele espera os 5 s
+**dormindo com `hlt`** até a **interrupção do timer (IRQ0)** acordá-lo a cada
+250 ms (`idt_esperar_ms`) e relendo o RTC. Só os caracteres que mudaram são
+redesenhados — o resto da tela não pisca. A CPU não fica em *polling*.
 
 ---
 
@@ -162,10 +179,11 @@ BIOS
                                                       carrega com LIDT e
                                                       dá STI (liga as
                                                       interrupções)
-                                                      └─> laço: idt_esperar_ms
-                                                          (hlt até o IRQ0 do
-                                                          timer) e relê o RTC —
-                                                          a hora corre sozinha
+                                                      └─> espera 5 s (idt_esperar_ms — hlt até o IRQ0 do
+                                                          timer) e relê o RTC — a hora corre sozinha
+                                                          └─> ata.rs + ext4.rs: acha /servicos/usr no ext4
+                                                              └─> 0x60000 usr (servicos): CLI + limpa a
+                                                                  tela → PRETA (o serviço assumiu)
 ```
 
 ### Mapa de memória (modo protegido)
@@ -175,6 +193,7 @@ BIOS
 | `0x6000` | Buffer de 1 bloco ext4 usado pelo `inicio` |
 | `0x10000` | `ini/inicio` (2º estágio, até 61440 bytes) |
 | `0x20000` | `nucleo/nucos` (núcleo, até 256 KiB) |
+| `0x60000` | `servicos/usr` (serviço usr, até 128 KiB — o núcleo salta para cá) |
 | `0x90000` | Topo da pilha (definida pelo `inimin`; o `inicio` a zera antes do salto) |
 | `0xA0000` | Memória de vídeo do modo 13h (320×200×8) |
 | `0x100000` | Início do heap gerenciado pelo `memoria.rs` (1 MiB) |
@@ -241,13 +260,13 @@ binário; o `copilar.sh` confere com `nm` que ele está em `0x00010000`.
 
 | Item | Valor |
 |---|---|
-| Arquivos | `nucleo/nucleo.rs` (maestro), `nucleo/drivers/video/video.rs` (vídeo), `nucleo/drivers/tempo/pit.rs` (tempo), `nucleo/drivers/tempo/rtc.rs` (relógio), `nucleo/drivers/mouse/ps2.rs` (mouse), `nucleo/cpu/idt.rs` (interrupções), `nucleo/texto.rs` (texto) e `nucleo/memoria/memoria.rs` (RAM) |
+| Arquivos | `nucleo/nucleo.rs` (maestro), `nucleo/drivers/video/video.rs` (vídeo), `nucleo/drivers/tempo/pit.rs` (tempo), `nucleo/drivers/tempo/rtc.rs` (relógio), `nucleo/drivers/mouse/ps2.rs` (mouse), `nucleo/drivers/disco/ata.rs` (disco), `nucleo/arquivos/ext4.rs` (ext4), `nucleo/cpu/idt.rs` (interrupções), `nucleo/texto.rs` (texto) e `nucleo/memoria/memoria.rs` (RAM) |
 | Binário | `nucleo/nucos` (binário plano, sem ELF) |
 | Endereço de carga | **0x20000** (o `_start` fica exatamente no primeiro byte) |
 | Arquitetura | **x86 32 bits, modo protegido** |
 | Biblioteca | nenhuma — `#![no_std]`, sem libc |
 | Compilação | `rustc --target i686-unknown-linux-gnu -C panic=abort -C opt-level=s -C target-feature=-sse,-sse2 --emit=obj` para cada `.rs` |
-| Linkagem | `ld -m elf_i386 -T nucleo/nucleo.ld --nmagic` (nucleo.o + video.o + pit.o + rtc.o + ps2.o + idt.o + texto.o + memoria.o) + `objcopy -O binary` |
+| Linkagem | `ld -m elf_i386 -T nucleo/nucleo.ld --nmagic` (nucleo.o + video.o + pit.o + rtc.o + ps2.o + ata.o + ext4.o + idt.o + texto.o + memoria.o) + `objcopy -O binary` |
 | Vídeo | **Modo 13h: 320×200, 256 cores** |
 
 O `nucleo.rs` é só o **maestro**: não desenha nem administra memória, apenas
@@ -275,6 +294,15 @@ chama os módulos na ordem certa.
   contador `TICKS` (100 Hz) e o **IRQ12 (mouse, vetor 0x74)** só manda EOI
   nos dois PICs. `idt_esperar_ms()` conta os ticks e dorme com `hlt` até
   o próximo IRQ0 — é assim que o laço do relógio espera sem *polling*;
+- `ata.rs` exporta `ata_ler_setores(lba, n, destino)` — lê setores do
+  **disco primário mestre** (portas `0x1F0`/`0x1F7`) por PIO, com o mesmo
+  protocolo do `ini/inicio.c` (espera BSY, manda o LBA e polimenta DRQ);
+  é o caminho do núcleo para o ext4 (a int 0x13 do BIOS não existe aqui);
+- `ext4.rs` exporta `ext4_carregar(dir, dir_tam, arq, arq_tam, destino, max)`
+  — desce do **inode raiz** (2) pelo descritor do grupo 0, varre os
+  diretórios (árvore de extensões, profundidade 0) e lê o arquivo pelo
+  `ata.rs` em blocos de 1 KiB; é assim que o núcleo acha
+  **`/servicos/usr`** para sair;
 - `texto.rs` exporta `texto_escrever(texto, tamanho, x, y)` e
   `texto_escrever_numero(valor, x, y)`, guarda a fonte 8×8 (dígitos, letras e
   minúsculas do alfabeto usado) e desenha cada caractere chamando `video_pixel`;
@@ -298,10 +326,21 @@ O que o maestro faz:
    nada;
 7. **inicializa a IDT** (`idt_iniciar()`): monta a tabela, carrega com `LIDT`
    e dá `STI` — a partir daqui o **IRQ0 do timer** passa a contar os ticks;
-8. entra no **laço do relógio**: `idt_esperar_ms(250)` + `rtc_atualizar()`,
-   para sempre — a espera é **por interrupção** (dorme em `hlt` até o IRQ0
-   acordar), não mais por *polling*; é assim que a hora se atualiza sozinha
-   na tela.
+8. **espera 5 segundos mantendo o relógio vivo**: dorme em **fatias de
+   250 ms** (`idt_esperar_ms(INTERVALO_RELOGIO_MS)`) e relê o RTC
+   (`rtc_atualizar()`) a cada fatia — a espera é **por interrupção**
+   (dorme em `hlt` até o IRQ0 acordar) e os **segundos continuam
+   correndo** na 2ª linha durante toda a espera;
+9. **SAI do kernel**: chama `ext4_carregar("servicos", "usr", 0x60000, ...)`,
+   que usa `ata.rs` para ler o disco e achar **`/servicos/usr`** no ext4;
+   com o arquivo em `0x60000`, dá **`CLI`**, zera a pilha em `0x90000` e
+   **salta** para o serviço. Se o arquivo não for achado, o núcleo cai no
+   **laço do relógio** (as três linhas ficam na tela — é o diagnóstico da
+   falha).
+
+O laço do relógio (`laço_do_relogio`) também continua disponível: é o
+"modo de segurança" do núcleo, onde `idt_esperar_ms(250)` + `rtc_atualizar()`
+mantêm a hora viva sem *polling*.
 
 #### Como o `memoria.rs` gerencia a RAM
 
@@ -330,6 +369,36 @@ de `.text.unlikely` — o primeiro byte do arquivo é sempre o `_start`
 Cada módulo novo entra como um `.rs` separado (compilado em seu próprio `.o`) e é
 somado na linha do `ld`; o `nucleo.ld` continua sendo a base da linkagem.
 
+### Fase 4 — `servicos/servicos.cpp` (o serviço usr)
+
+| Item | Valor |
+|---|---|
+| Arquivo | `servicos/servicos.cpp` |
+| Binário | `servicos/usr` (binário plano, sem ELF) |
+| Endereço de carga | **0x60000** (logo depois dos 256 KiB do núcleo; a entrada `_start` fica exatamente aí) |
+| Arquitetura | **x86 32 bits, modo protegido** |
+| Biblioteca | nenhuma — *freestanding*, compilado com `g++ -m32` sem exceções/RTTI |
+| Vídeo | **Modo 13h: 320×200, 256 cores** (o modo continua ligado do boot) |
+
+Este é o **primeiro serviço do sistema** e a **saída do kernel**:
+
+1. o `nucleo.rs` espera **5 segundos**, lê **`/servicos/usr`** do ext4 e salta
+   para `0x60000` com as interrupções desligadas (`CLI`) e a pilha zerada em
+   `0x90000`;
+2. o `_start` do usr **limpa a tela inteira** em preto (`0xA0000`), no mesmo
+   modo 13h que o boot deixou ligado;
+3. ele **dorme em `hlt` para sempre** — o usuário vê uma **tela preta**,
+   sinal de que o kernel saiu e o serviço assumiu.
+
+**Papel futuro:** o usr voltará a **chamar o núcleo** (pedindo desenho,
+arquivos, entrada, etc.) e o núcleo será a **ponte permanente** entre o
+kernel e a interface gráfica — a IDT, os drivers e o heap continuam na
+memória, prontos para serem reutilizados.
+
+O `copilar.sh` linka o usr em `0x60000` (`ld -Ttext=0x60000 -e _start`) e
+confere com `nm` que o `_start` está em `0x00060000`, do mesmo jeito que faz
+com o `inicio` (0x10000) e o `nucos` (0x20000).
+
 ---
 
 ## Como o `copilar.sh` funciona
@@ -339,26 +408,31 @@ somado na linha do `ld`; o `nucleo.ld` continua sendo a base da linkagem.
 2. **Compila** `ini/inicio.c` com `gcc -m32` freestanding em `ini/inicio.o`,
    linka em `0x10000` (`ld -e _start`), converte para binário plano com
    `objcopy` e confere a entrada `_start` com `nm`;
-3. **Compila** `nucleo/nucleo.rs` e os módulos `nucleo/drivers/video/video.rs`,
+3. **Compila** `servicos/servicos.cpp` com `g++ -m32` freestanding em
+   `servicos/servicos.o`, linka em `0x60000` (`ld -e _start`), converte para
+   binário plano (`servicos/usr`) e confere a entrada `_start` com `nm`;
+4. **Compila** `nucleo/nucleo.rs` e os módulos `nucleo/drivers/video/video.rs`,
    `nucleo/drivers/tempo/pit.rs`, `nucleo/drivers/tempo/rtc.rs`,
-   `nucleo/drivers/mouse/ps2.rs`, `nucleo/cpu/idt.rs`,
+   `nucleo/drivers/mouse/ps2.rs`, `nucleo/drivers/disco/ata.rs`,
+   `nucleo/arquivos/ext4.rs`, `nucleo/cpu/idt.rs`,
    `nucleo/texto.rs` e `nucleo/memoria/memoria.rs` com `rustc` (`#![no_std]`,
    `panic=abort`, `opt-level=s`, `relocation-model=static`) em objetos
    separados — cada `.o` fica salvo ao lado da sua fonte, igual ao
-   `ini/inicio.o` —, linka os **oito** com o `nucleo.ld` em `0x20000`,
+   `ini/inicio.o` —, linka os **dez** com o `nucleo.ld` em `0x20000`,
    converte para binário plano e confere o `_start` com `nm`;
-4. **Cria** a `CosmOS.img` vazia com exatamente **20 MB** (`dd`);
-5. **Formata** em **ext4** com rótulo `CosmOS`, blocos de **1 KiB** e inodes de
+5. **Cria** a `CosmOS.img` vazia com exatamente **20 MB** (`dd`);
+6. **Formata** em **ext4** com rótulo `CosmOS`, blocos de **1 KiB** e inodes de
    **256 bytes** (`mkfs.ext4 -b 1024 -I 256`);
-6. **Popula a imagem sem precisar de root**, usando `debugfs`:
-   - cria somente as pastas `inicio/` e `nucleo/`;
+7. **Popula a imagem sem precisar de root**, usando `debugfs`:
+   - cria somente as pastas `inicio/`, `nucleo/` e `servicos/`;
    - copia `inimin` e `inicio` para `inicio/`;
    - copia `nucos` para `nucleo/`;
+   - copia `usr` para `servicos/`;
    - apaga o `lost+found` que o ext4 cria sozinho;
-   - confere se os três arquivos estão lá;
-7. **Grava os 2 setores de boot** (`ini/inimin`) no início da imagem com
+   - confere se os **quatro** arquivos estão lá;
+8. **Grava os 2 setores de boot** (`ini/inimin`) no início da imagem com
    `dd conv=notrunc` — é o bloco de boot reservado do ext4;
-8. **Verifica** a imagem com `e2fsck -f -n`.
+9. **Verifica** a imagem com `e2fsck -f -n`.
 
 Resultado final da `CosmOS.img`:
 
@@ -369,6 +443,7 @@ Byte 1024      : superbloco ext4 (íntegro — verificado com e2fsck)
 Raiz (ext4)    : /inicio/inimin   (1º estágio)
                  /inicio/inicio   (2º estágio)
                  /nucleo/nucos    (núcleo em Rust)
+                 /servicos/usr    (serviço usr — a saída do kernel)
 ```
 
 ---
@@ -380,15 +455,16 @@ pixels das capturas):
 
 - `ini/inimin` com **1024 bytes** e assinatura `55 AA` no offset 510;
 - `ini/inicio` com entrada `_start` em **0x10000**;
+- `servicos/usr` com entrada `_start` em **0x60000**;
 - `nucleo/nucos` com entrada `_start` em **0x20000** (primeiro byte do arquivo);
 - `CosmOS.img` com **20971520 bytes** (20 MB) e `e2fsck` sem erros;
-- raiz da imagem contendo **apenas** `/inicio` e `/nucleo`, com `inimin`,
-  `inicio` e `nucos` como arquivos separados;
+- raiz da imagem contendo **apenas** `/inicio`, `/nucleo` e `/servicos`, com
+  `inimin`, `inicio`, `nucos` e `usr` como arquivos separados;
 - boot real no QEMU: CPU em **modo protegido** (`CPL=0`), sem nenhuma
   instrução SSE/AVX no núcleo. O `copilar.sh` compila os módulos com
   `-C target-feature=-sse,-sse2` justamente para garantir isso (um `xorps`/
   `movaps` gerado pelo `rustc` derrubava a CPU em *triple fault*);
-- **t ≈ 1 s:** mensagem **"CosmOS Beta v0.1 Construção 0.6.2026"** centralizada,
+- **t ≈ 1 s:** mensagem **"CosmOS Beta v0.1 Construção 0.7.2026"** centralizada,
   ocupando `x = 16..300` e `y = 2..9` (primeira linha);
 - **t ≈ 4 s:** tela **limpa**, mensagem **"Entrou no Nucos"** na primeira linha
   à esquerda, ocupando `x = 0..116` e `y = 2..8` — o controle chegou ao núcleo;
@@ -407,8 +483,15 @@ pixels das capturas):
   com a tela mantendo seus ~7944 pixeis desenhados — a hora avança sozinha
   enquanto a CPU dorme em `hlt`. Conferido também com `qemu -d int,cpu_reset`:
   nenhum *triple fault*, os vetores de hardware todos respondem com EOI.
+- **saída do kernel (tela preta):** dois `screendump`s do mesmo boot:
+  **t ≈ 4 s** mostra as **três linhas do núcleo** (2692 pixéis acesos em
+  `y = 4..65` da captura 640×400 — boas-vindas, data/hora e RAM) e
+  **t ≈ 11 s** mostra **0 pixéis não pretos** — **tela 100% preta**. Os 5 s
+  passaram, o `/servicos/usr` foi achado no ext4, carregado em `0x60000` e
+  assumiu a CPU (se o arquivo não fosse achado, as três linhas continuariam
+  na tela no laço de segurança).
 
-Bugs encontrados e corrigidos durante a Construção 0.6.2026:
+Bugs encontrados e corrigidos durante a Construção 0.7.2026:
 
 1. `u8 i; ... i < 256` em `carrega_inode` virava **loop infinito** (o `u8` dá a
    volta antes de chegar a 256) — corrigido para `u16`;

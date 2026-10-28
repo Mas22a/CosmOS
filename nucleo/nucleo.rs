@@ -1,5 +1,5 @@
 /* ==========================================================================
- *   CosmOS Beta v0.1 — Construção 0.6.2026
+ *   CosmOS Beta v0.1 — Construção 0.7.2026
  *   nucleo/nucleo.rs — Núcleo do CosmOS (Nucos) — o maestro
  * --------------------------------------------------------------------------
  *   Alvo   : x86 32 bits, modo protegido. O inicio procura /nucleo/nucos
@@ -8,11 +8,20 @@
  *
  *   O núcleo é o MAESTRO do sistema: ele não desenha nem administra a
  *   memória diretamente. Apenas chama, na ordem certa, os módulos:
- *     - nucleo/drivers/video/video.rs  → tela (modo 13h)
- *     - nucleo/drivers/tempo/pit.rs    → tempo (PIT canal 0)
- *     - nucleo/drivers/tempo/rtc.rs    → relógio (RTC, data e hora na tela)
- *     - nucleo/texto.rs                → escrita (fonte 8x8)
- *     - nucleo/memoria.rs              → heap da RAM
+ *     - nucleo/drivers/video/video.rs   → tela (modo 13h)
+ *     - nucleo/drivers/tempo/pit.rs     → tempo (PIT canal 0)
+ *     - nucleo/drivers/tempo/rtc.rs     → relógio (RTC, data e hora na tela)
+ *     - nucleo/texto.rs                 → escrita (fonte 8x8)
+ *     - nucleo/memoria.rs               → heap da RAM
+ *     - nucleo/drivers/disco/ata.rs     → disco (ATA PIO)
+ *     - nucleo/arquivos/ext4.rs         → sistema de arquivos (ext4)
+ *
+ *   SAÍDA DO KERNEL: depois de montar tudo (relógio, mouse, IDT), o
+ *   núcleo espera 5 segundos, procura /servicos/usr no ext4 da imagem,
+ *   carrega em 0x60000, desliga as interrupções (CLI) e salta para ele.
+ *   Por enquanto o usr só deixa a tela preta — no futuro ele voltará a
+ *   chamar o núcleo, que será a PONTE permanente entre o kernel e a
+ *   interface gráfica.
  *
  *   Layout das linhas (fonte 8x8, folga de 12 px):
  *     y =  2 → "Entrou no Nucos"          (1ª linha)
@@ -22,8 +31,8 @@
  *
  *   Sem biblioteca padrão (#![no_std]): compilado com
  *       rustc --target i686-unknown-linux-gnu -C panic=abort -C opt-level=s
- *   e linkado junto com video.o, texto.o, memoria.o, pit.o e rtc.o como
- *   binário plano em 0x20000 (ver copilar.sh).
+ *   e linkado junto com video.o, texto.o, memoria.o, pit.o, rtc.o, mouse.o,
+ *   idt.o, ata.o e ext4.o como binário plano em 0x20000 (ver copilar.sh).
  * ========================================================================== */
 
 #![no_std]
@@ -50,6 +59,17 @@ extern "C" {
     /* IDT (nucleo/cpu/idt.rs) */
     fn idt_iniciar();
     fn idt_esperar_ms(ms: u32);
+    fn idt_ticks() -> u32;
+    /* ext4 (nucleo/arquivos/ext4.rs) — procura /servicos/usr na imagem.
+     * Por baixo ele usa o driver ATA (nucleo/drivers/disco/ata.rs). */
+    fn ext4_carregar(
+        diretorio: *const u8,
+        dir_tam: usize,
+        arquivo: *const u8,
+        arq_tam: usize,
+        destino: *mut u8,
+        max: usize,
+    ) -> usize;
 }
 
 const COR_PRETO: u8 = 0;
@@ -65,6 +85,21 @@ const LINHA_RAM: usize = 26; /* a 2ª (y = 14) é da data/hora (rtc.rs) */
 /* Quantas vezes por segundo a hora é relida no RTC. 250 ms detecta a
  * virada do segundo rápido e deixa a contagem estável. */
 const INTERVALO_RELOGIO_MS: u32 = 250;
+
+/* --- Saída do kernel: /servicos/usr -------------------------------------- */
+
+/* Espera do kernel antes de sair (5 segundos). */
+const ESPERA_SAIDA_MS: u32 = 5000;
+
+/* Onde /servicos/usr é carregado: logo depois do núcleo, que ocupa
+ * 0x20000..0x60000 (256 KiB no máximo). O usr usa 0x60000..0x80000
+ * (128 KiB no máximo) e a pilha em 0x90000 tem 64 KiB de folga. */
+const USR_MEM: usize = 0x60000;
+const USR_MAX: usize = 128 * 1024;
+
+/* Caminho do serviço dentro da imagem: /servicos/usr. */
+const DIR_SERVICOS: &str = "servicos";
+const ARQ_USR: &str = "usr";
 
 /* Ponto de entrada: o inicio salta para 0x20000, onde o copilar.sh linkou
  * este binário. O #[link_section] joga o _start para .text.startup, que o
@@ -83,7 +118,9 @@ pub extern "C" fn _start() -> ! {
     iniciar_mouse();
     iniciar_idt();
 
-    laço_do_relogio();
+    /* Depois de tudo montado: espera 5 s e SAI do kernel para o
+     * serviço /servicos/usr (a tela dele é preta). */
+    sair_do_nucleo();
 }
 
 /* --- Coordenação dos módulos -------------------------------------------- */
@@ -148,13 +185,78 @@ fn iniciar_idt() {
 /* Laço do relógio: espera pelo timer (via IDT/interrupção) e relê o RTC.
  * O rtc_atualizar() só redesenha o que mudou, então a
  * hora vira sozinha sem piscar a tela e sem nunca mais sair daqui.
- * O mouse agora é processado por IRQ12 (isr_mouse_handler), não mais aqui. */
+ * O mouse agora é processado por IRQ12 (isr_mouse_handler), não mais aqui.
+ * Também é o "modo de segurança": se o /servicos/usr não for achado no
+ * ext4, o núcleo fica aqui, com a tela informativa. */
 fn laço_do_relogio() -> ! {
     loop {
         unsafe {
             idt_esperar_ms(INTERVALO_RELOGIO_MS);
             rtc_atualizar();
         }
+    }
+}
+
+/* --- Saída do kernel: do núcleo para o /servicos/usr ---------------------- */
+
+/* Espera os 5 segundos de saída MANTENDO O RELÓGIO VIVO: dorme em fatias
+ * de 250 ms (por interrupção, IRQ0) e relê o RTC a cada fatia — os
+ * segundos continuam correndo na 2ª linha até o kernel entregar a CPU.
+ * Sem isto (uma espera única de 5000 ms) a hora ficaria congelada no
+ * momento em que o núcleo entrou. */
+fn espera_saida() {
+    unsafe {
+        let inicio = idt_ticks();
+        let alvo = ESPERA_SAIDA_MS / 10; /* TICKS a 100 Hz → 1 tick = 10 ms */
+
+        while idt_ticks().wrapping_sub(inicio) < alvo {
+            idt_esperar_ms(INTERVALO_RELOGIO_MS);
+            rtc_atualizar();
+        }
+    }
+}
+
+/* Espera 5 segundos (com o relógio correndo), carrega /servicos/usr do
+ * ext4 em 0x60000 e salta para ele. Se o arquivo não existir, cai no
+ * laço do relógio (a tela continua mostrando as três linhas — é o
+ * diagnóstico da falha). */
+fn sair_do_nucleo() -> ! {
+    espera_saida();
+
+    if carregar_usr() > 0 {
+        saltar_usr();
+    }
+    laço_do_relogio();
+}
+
+/* Lê /servicos/usr do ext4 da imagem para USR_MEM. Devolve o tamanho
+ * carregado ou 0 = falha. */
+fn carregar_usr() -> usize {
+    unsafe {
+        ext4_carregar(
+            DIR_SERVICOS.as_ptr(),
+            DIR_SERVICOS.len(),
+            ARQ_USR.as_ptr(),
+            ARQ_USR.len(),
+            USR_MEM as *mut u8,
+            USR_MAX,
+        )
+    }
+}
+
+/* Entrega a CPU para o usr: desliga as interrupções (a IDT e os
+ * handlers continuam na memória, prontos para quando o núcleo for
+ * chamado de volta no futuro), zera a pilha em 0x90000 e salta para
+ * 0x60000, onde /servicos/usr foi carregado. */
+fn saltar_usr() -> ! {
+    unsafe {
+        asm!(
+            "cli",
+            "mov esp, 0x90000",
+            "jmp {}",
+            in(reg) USR_MEM,
+            options(noreturn)
+        );
     }
 }
 

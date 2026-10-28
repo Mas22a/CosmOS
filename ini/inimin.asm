@@ -1,5 +1,5 @@
 ; ==========================================================================
-;   CosmOS Beta v0.1 — Construção 0.6.2026
+;   CosmOS Beta v0.1 — Construção 0.7.2026
 ;   ini/inimin.asm — Primeiro estágio de boot do CosmOS
 ; --------------------------------------------------------------------------
 ;   Alvo   : x86-64 (o BIOS entrega a CPU em modo real de 16 bits)

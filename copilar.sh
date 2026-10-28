@@ -1,31 +1,38 @@
 #!/usr/bin/env bash
 # ==========================================================================
-#   CosmOS Beta v0.1 — Construção 0.6.2026
+#   CosmOS Beta v0.1 — Construção 0.7.2026
 #   copilar.sh — compila os estágios de boot e gera a imagem CosmOS.img
 # --------------------------------------------------------------------------
 #   O que este script faz:
 #     1) Monta ini/inimin.asm  →  ini/inimin (1024 bytes = 2 setores)
 #     2) Compila ini/inicio.c  →  ini/inicio.o (objeto ELF)
 #                                →  ini/inicio   (binário plano em 0x10000)
-#     3) Compila nucleo/drivers/video/video.rs (driver de vídeo),
+#     3) Compila servicos/servicos.cpp → servicos/servicos.o
+#                                →  servicos/usr (binário plano em 0x60000,
+#                                o serviço que assume depois do kernel)
+#     4) Compila nucleo/drivers/video/video.rs (driver de vídeo),
 #        nucleo/drivers/tempo/pit.rs (driver de tempo — PIT),
 #        nucleo/drivers/tempo/rtc.rs (relógio — data/hora na tela),
 #        nucleo/drivers/mouse/ps2.rs (mouse PS/2 — mudo, sem desenhar),
+#        nucleo/drivers/disco/ata.rs (disco — ATA PIO),
+#        nucleo/arquivos/ext4.rs (sistema de arquivos — ext4),
 #        nucleo/cpu/idt.rs (IDT — interrupções de hardware),
 #        nucleo/texto.rs (driver de texto), nucleo/memoria/memoria.rs
 #        (gerenciador de RAM) e nucleo/nucleo.rs — cada um vira um .o
-#        salvo ao lado da fonte — e linka os oito → nucleo/nucos (binário
+#        salvo ao lado da fonte — e linka os dez → nucleo/nucos (binário
 #        plano em 0x20000)
-#     4) Cria a imagem vazia CosmOS.img com 20 MB
-#     5) Formata a imagem em ext4 (blocos de 1 KiB, inodes de 256 bytes)
-#     6) Cria somente as pastas inicio/ e nucleo/ dentro da imagem e coloca
-#        o inimin, o inicio e o nucos nelas (sem precisar de root, via
-#        debugfs) e apaga o lost+found que o ext4 cria sozinho
-#     7) Escreve os 2 primeiros setores (bloco de boot ext4) no início
+#     5) Cria a imagem vazia CosmOS.img com 20 MB
+#     6) Formata a imagem em ext4 (blocos de 1 KiB, inodes de 256 bytes)
+#     7) Cria somente as pastas inicio/, nucleo/ e servicos/ dentro da
+#        imagem e coloca o inimin, o inicio, o nucos e o usr nelas (sem
+#        precisar de root, via debugfs) e apaga o lost+found que o ext4
+#        cria sozinho
+#     8) Escreve os 2 primeiros setores (bloco de boot ext4) no início
 #        da imagem: o setor 0 carrega o setor 1, que localiza
 #        /inicio/inicio no ext4 e passa o controle para ele — ele acha
-#        /nucleo/nucos, espera 2 s e salta para o núcleo
-#     8) Conferir o sistema de arquivos
+#        /nucleo/nucos, espera 2 s e salta para o núcleo; o núcleo
+#        espera 5 s, acha /servicos/usr no ext4 e salta para ele
+#     9) Conferir o sistema de arquivos
 #
 #   Uso: ./copilar.sh
 # ==========================================================================
@@ -40,6 +47,9 @@ BIN="$RAIZ/ini/inimin"
 FONTE_C="$RAIZ/ini/inicio.c"
 OBJ_C="$RAIZ/ini/inicio.o"
 BIN_C="$RAIZ/ini/inicio"
+FONTE_SERVICOS="$RAIZ/servicos/servicos.cpp"
+OBJ_SERVICOS="$RAIZ/servicos/servicos.o"
+USR="$RAIZ/servicos/usr"
 FONTE_RS="$RAIZ/nucleo/nucleo.rs"
 OBJ_NUCLEO="$RAIZ/nucleo/nucleo.o"
 FONTE_VIDEO="$RAIZ/nucleo/drivers/video/video.rs"
@@ -56,6 +66,10 @@ FONTE_MOUSE="$RAIZ/nucleo/drivers/mouse/ps2.rs"
 OBJ_MOUSE="$RAIZ/nucleo/drivers/mouse/ps2.o"
 FONTE_IDT="$RAIZ/nucleo/cpu/idt.rs"
 OBJ_IDT="$RAIZ/nucleo/cpu/idt.o"
+FONTE_ATA="$RAIZ/nucleo/drivers/disco/ata.rs"
+OBJ_ATA="$RAIZ/nucleo/drivers/disco/ata.o"
+FONTE_EXT4="$RAIZ/nucleo/arquivos/ext4.rs"
+OBJ_EXT4="$RAIZ/nucleo/arquivos/ext4.o"
 NUCOS="$RAIZ/nucleo/nucos"
 IMG="$RAIZ/CosmOS.img"
 TAMANHO_MB=20
@@ -63,6 +77,13 @@ TAMANHO_MB=20
 # Endereço onde o /nucleo/nucos é carregado e seu tamanho máximo
 NUCOS_MEM=0x20000
 NUCOS_MAX=262144          # 256 KiB (0x40000)
+
+# Endereço onde o /servicos/usr é carregado e seu tamanho máximo.
+# 0x60000 = logo depois do núcleo (0x20000 + 256 KiB); o usr pode ter
+# até 128 KiB (0x60000..0x80000), deixando 64 KiB de folga antes da
+# pilha em 0x90000.
+USR_MEM=0x60000
+USR_MAX=131072            # 128 KiB (0x20000)
 
 # Opções comuns dos módulos do núcleo.
 #   -C target-feature=-sse,-sse2
@@ -94,7 +115,7 @@ if [ -z "${ALVO_LIB:-}" ] || [ ! -d "$ALVO_LIB" ]; then
 fi
 
 # --- 1) Compilar o primeiro estágio --------------------------------------
-echo "[CosmOS] 1/8 Compilando ini/inimin.asm ..."
+echo "[CosmOS] 1/9 Compilando ini/inimin.asm ..."
 nasm -f bin "$ASM" -o "$BIN"
 
 BYTES="$(wc -c < "$BIN")"
@@ -104,7 +125,7 @@ if [ "$BYTES" -ne 1024 ]; then
 fi
 
 # --- 2) Compilar o segundo estágio (C freestanding, binário plano) -------
-echo "[CosmOS] 2/8 Compilando ini/inicio.c ..."
+echo "[CosmOS] 2/9 Compilando ini/inicio.c ..."
 gcc -m32 -Os -ffreestanding -nostdlib -nostartfiles \
     -fno-pie -fno-builtin -fno-stack-protector \
     -fno-asynchronous-unwind-tables -fno-unwind-tables \
@@ -127,47 +148,85 @@ if [ "$TAM_C" -le 0 ] || [ "$TAM_C" -gt 61440 ]; then
     exit 1
 fi
 
-# --- 3) Compilar o núcleo (Rust no_std, binário plano) --------------------
+# --- 3) Compilar o serviço usr (C++ freestanding, binário plano) ----------
+# O nucleo.rs espera 5 s depois de entrar, acha /servicos/usr no ext4 e
+# salta para 0x60000 — é a SAÍDA do kernel.
+echo "[CosmOS] 3/9 Compilando servicos/servicos.cpp ..."
+g++ -m32 -Os -ffreestanding -nostdlib -nostartfiles \
+    -fno-pie -fno-builtin -fno-stack-protector \
+    -fno-exceptions -fno-rtti -fno-use-cxa-atexit \
+    -fno-asynchronous-unwind-tables -fno-unwind-tables \
+    -fno-toplevel-reorder \
+    -c "$FONTE_SERVICOS" -o "$OBJ_SERVICOS"
+
+ld -m elf_i386 -Ttext=$USR_MEM -e _start --nmagic \
+    -o "$TMP/usr.elf" "$OBJ_SERVICOS"
+objcopy -O binary "$TMP/usr.elf" "$USR"
+
+ENTRADA_U="$(nm "$TMP/usr.elf" | awk '$3 == "_start" { print $1 }')"
+ESPERADO_U="$(printf '%08x' "$((USR_MEM))")"
+if [ "$ENTRADA_U" != "$ESPERADO_U" ]; then
+    echo "[CosmOS] ERRO: _start do usr está em 0x$ENTRADA_U; o núcleo salta para $USR_MEM." >&2
+    exit 1
+fi
+
+TAM_U="$(wc -c < "$USR")"
+if [ "$TAM_U" -le 0 ] || [ "$TAM_U" -gt "$USR_MAX" ]; then
+    echo "[CosmOS] ERRO: servicos/usr tem $TAM_U bytes (esperado entre 1 e $USR_MAX)." >&2
+    exit 1
+fi
+
+# --- 4) Compilar o núcleo (Rust no_std, binário plano) --------------------
 # Cada .o fica salvo ao lado da sua fonte (nucleo/video.o, nucleo/pit.o...),
 # igual ao ini/inicio.o — só o .elf intermediário vai para $TMP.
-echo "[CosmOS] 3/8 Compilando nucleo/drivers/video/video.rs ..."
+echo "[CosmOS] 4/9 Compilando nucleo/drivers/video/video.rs ..."
 rustc "${FLAGS_NUCLEO[@]}" \
     --crate-type=lib --emit=obj -o "$OBJ_VIDEO" "$FONTE_VIDEO"
 
-echo "[CosmOS] 3/8 Compilando nucleo/drivers/tempo/pit.rs ..."
+echo "[CosmOS] 4/9 Compilando nucleo/drivers/tempo/pit.rs ..."
 rustc "${FLAGS_NUCLEO[@]}" \
     --crate-type=lib --emit=obj -o "$OBJ_PIT" "$FONTE_PIT"
 
-echo "[CosmOS] 3/8 Compilando nucleo/drivers/tempo/rtc.rs ..."
+echo "[CosmOS] 4/9 Compilando nucleo/drivers/tempo/rtc.rs ..."
 rustc "${FLAGS_NUCLEO[@]}" \
     --crate-type=lib --emit=obj -o "$OBJ_RTC" "$FONTE_RTC"
 
-echo "[CosmOS] 3/8 Compilando nucleo/texto.rs ..."
+echo "[CosmOS] 4/9 Compilando nucleo/texto.rs ..."
 rustc "${FLAGS_NUCLEO[@]}" \
     --crate-type=lib --emit=obj -o "$OBJ_TEXTO" "$FONTE_TEXTO"
 
-echo "[CosmOS] 3/8 Compilando nucleo/memoria/memoria.rs ..."
+echo "[CosmOS] 4/9 Compilando nucleo/memoria/memoria.rs ..."
 rustc "${FLAGS_NUCLEO[@]}" \
     --crate-type=lib --emit=obj -o "$OBJ_MEMORIA" "$FONTE_MEMORIA"
 
-echo "[CosmOS] 3/8 Compilando nucleo/drivers/mouse/ps2.rs ..."
+echo "[CosmOS] 4/9 Compilando nucleo/drivers/mouse/ps2.rs ..."
 rustc "${FLAGS_NUCLEO[@]}" \
     --crate-type=lib --emit=obj -o "$OBJ_MOUSE" "$FONTE_MOUSE"
 
-echo "[CosmOS] 3/8 Compilando nucleo/cpu/idt.rs ..."
+echo "[CosmOS] 4/9 Compilando nucleo/cpu/idt.rs ..."
 rustc "${FLAGS_NUCLEO[@]}" \
     --crate-type=lib --emit=obj -o "$OBJ_IDT" "$FONTE_IDT"
 
-echo "[CosmOS] 3/8 Compilando nucleo/nucleo.rs ..."
+echo "[CosmOS] 4/9 Compilando nucleo/drivers/disco/ata.rs ..."
+rustc "${FLAGS_NUCLEO[@]}" \
+    --crate-type=lib --emit=obj -o "$OBJ_ATA" "$FONTE_ATA"
+
+echo "[CosmOS] 4/9 Compilando nucleo/arquivos/ext4.rs ..."
+rustc "${FLAGS_NUCLEO[@]}" \
+    --crate-type=lib --emit=obj -o "$OBJ_EXT4" "$FONTE_EXT4"
+
+echo "[CosmOS] 4/9 Compilando nucleo/nucleo.rs ..."
 rustc "${FLAGS_NUCLEO[@]}" \
     --emit=obj -o "$OBJ_NUCLEO" "$FONTE_RS"
 
 # O nucleo.ld garante que o _start seja o primeiro byte em 0x20000.
-# video.o, texto.o, memoria.o, pit.o, rtc.o, mouse.o e idt.o entram junto: o maestro
-# (núcleo) chama video_limpar, texto_escrever, memoria_iniciar,
-# pit_iniciar, rtc_iniciar/rtc_atualizar, mouse_ps2_*, idt_iniciar/idt_esperar_ms.
+# video.o, texto.o, memoria.o, pit.o, rtc.o, mouse.o, idt.o, ata.o e
+# ext4.o entram junto: o maestro (núcleo) chama video_limpar,
+# texto_escrever, memoria_iniciar, pit_iniciar, rtc_iniciar/rtc_atualizar,
+# mouse_ps2_*, idt_iniciar/idt_esperar_ms, ata_ler_setores (via ext4) e
+# ext4_carregar — para achar /servicos/usr e sair do kernel.
 ld -m elf_i386 -T "$RAIZ/nucleo/nucleo.ld" --nmagic \
-    -o "$TMP/nucos.elf" "$OBJ_NUCLEO" "$OBJ_VIDEO" "$OBJ_TEXTO" "$OBJ_MEMORIA" "$OBJ_PIT" "$OBJ_RTC" "$OBJ_MOUSE" "$OBJ_IDT"
+    -o "$TMP/nucos.elf" "$OBJ_NUCLEO" "$OBJ_VIDEO" "$OBJ_TEXTO" "$OBJ_MEMORIA" "$OBJ_PIT" "$OBJ_RTC" "$OBJ_MOUSE" "$OBJ_IDT" "$OBJ_ATA" "$OBJ_EXT4"
 objcopy -O binary "$TMP/nucos.elf" "$NUCOS"
 
 ENTRADA_N="$(nm "$TMP/nucos.elf" | awk '$3 == "_start" { print $1 }')"
@@ -182,35 +241,36 @@ if [ "$TAM_N" -le 0 ] || [ "$TAM_N" -gt "$NUCOS_MAX" ]; then
     exit 1
 fi
 
-# --- 4) Imagem vazia de 20 MB --------------------------------------------
-echo "[CosmOS] 4/8 Criando CosmOS.img (${TAMANHO_MB} MB) ..."
+# --- 5) Imagem vazia de 20 MB --------------------------------------------
+echo "[CosmOS] 5/9 Criando CosmOS.img (${TAMANHO_MB} MB) ..."
 dd if=/dev/zero of="$IMG" bs=1M count="$TAMANHO_MB" status=none
 
-# --- 5) Formatar em ext4 --------------------------------------------------
-echo "[CosmOS] 5/8 Formatando em ext4 (blocos de 1 KiB, inodes de 256 bytes) ..."
+# --- 6) Formatar em ext4 --------------------------------------------------
+echo "[CosmOS] 6/9 Formatando em ext4 (blocos de 1 KiB, inodes de 256 bytes) ..."
 mkfs.ext4 -F -q -L CosmOS -b 1024 -I 256 "$IMG"
 
-# --- 6) Só as pastas inicio/ e nucleo/ com os binários dentro -------------
-echo "[CosmOS] 6/8 Criando inicio/ e nucleo/ com os binários dentro da imagem ..."
-printf 'mkdir inicio\nmkdir nucleo\ncd inicio\nwrite %s inimin\nwrite %s inicio\ncd ../nucleo\nwrite %s nucos\ncd /\nrmdir lost+found\nquit\n' \
-    "$BIN" "$BIN_C" "$NUCOS" | debugfs -w "$IMG" > /dev/null
+# --- 7) Só as pastas inicio/, nucleo/ e servicos/ com os binários dentro --
+echo "[CosmOS] 7/9 Criando inicio/, nucleo/ e servicos/ com os binários dentro da imagem ..."
+printf 'mkdir inicio\nmkdir nucleo\nmkdir servicos\ncd inicio\nwrite %s inimin\nwrite %s inicio\ncd ../nucleo\nwrite %s nucos\ncd ../servicos\nwrite %s usr\ncd /\nrmdir lost+found\nquit\n' \
+    "$BIN" "$BIN_C" "$NUCOS" "$USR" | debugfs -w "$IMG" > /dev/null
 
-for ARQ in inicio/inimin inicio/inicio nucleo/nucos; do
+for ARQ in inicio/inimin inicio/inicio nucleo/nucos servicos/usr; do
     if ! debugfs -R "stat /$ARQ" "$IMG" 2> /dev/null | grep -q 'Inode:'; then
         echo "[CosmOS] ERRO: não foi possível gravar /$ARQ dentro da imagem." >&2
         exit 1
     fi
 done
 
-# --- 7) Gravar o bloco de boot (2 setores) no início da imagem -----------
-echo "[CosmOS] 7/8 Gravando o primeiro estágio no bloco de boot (2 setores) ..."
+# --- 8) Gravar o bloco de boot (2 setores) no início da imagem -----------
+echo "[CosmOS] 8/9 Gravando o primeiro estágio no bloco de boot (2 setores) ..."
 dd if="$BIN" of="$IMG" bs=512 count=2 conv=notrunc status=none
 
-# --- 8) Conferir o sistema de arquivos -----------------------------------
-echo "[CosmOS] 8/8 Verificando a imagem ..."
+# --- 9) Conferir o sistema de arquivos -----------------------------------
+echo "[CosmOS] 9/9 Verificando a imagem ..."
 e2fsck -f -n "$IMG" > /dev/null
 
 echo "[CosmOS] Pronto! Imagem gerada: CosmOS.img (${TAMANHO_MB} MB, ext4)"
 echo "[CosmOS] Conteúdo: /inicio/inimin (1º estágio)  |  /inicio/inicio (2º estágio, ${TAM_C} bytes)"
 echo "[CosmOS]           /nucleo/nucos (núcleo em Rust, ${TAM_N} bytes, carregado em 0x20000)"
-echo "[CosmOS] Setor de boot: 2 setores (1024 bytes) — setor 0 → setor 1 → /inicio/inicio → /nucleo/nucos"
+echo "[CosmOS]           /servicos/usr (serviço usr, ${TAM_U} bytes, carregado em $USR_MEM)"
+echo "[CosmOS] Setor de boot: 2 setores (1024 bytes) — setor 0 → setor 1 → /inicio/inicio → /nucleo/nucos → /servicos/usr"
